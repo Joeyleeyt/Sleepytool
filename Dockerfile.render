@@ -1,0 +1,45 @@
+# Render worker image — adds ffmpeg/ffprobe on top of the shared monorepo image.
+# Uses Debian's ffmpeg which supports libx264 / libx265 (software encode).
+# On Fly GPU machines, swap to a CUDA-based image with NVENC if you want to
+# flip NVENC_ENABLED=true.
+
+FROM node:20-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates curl tini ffmpeg fonts-inter \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+WORKDIR /app
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* turbo.json tsconfig.base.json ./
+COPY apps/api/package.json apps/api/
+COPY apps/orchestrator/package.json apps/orchestrator/
+COPY apps/workers/labs-worker/package.json apps/workers/labs-worker/
+COPY apps/workers/tts-worker/package.json apps/workers/tts-worker/
+COPY apps/workers/veo3-worker/package.json apps/workers/veo3-worker/
+COPY apps/workers/render-worker/package.json apps/workers/render-worker/
+COPY packages/core/package.json packages/core/
+COPY packages/db/package.json packages/db/
+COPY packages/queue/package.json packages/queue/
+COPY packages/storage/package.json packages/storage/
+COPY packages/ai-clients/package.json packages/ai-clients/
+COPY packages/prompt-engine/package.json packages/prompt-engine/
+COPY packages/timeline-engine/package.json packages/timeline-engine/
+COPY packages/render/package.json packages/render/
+
+RUN if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile; else pnpm install; fi
+
+COPY apps apps
+COPY packages packages
+COPY infra infra
+COPY scripts scripts
+
+ENV NODE_ENV=production
+ENV APP_TARGET=render-worker
+ENV RENDER_WORK_DIR=/data/emberforge
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["sh", "-c", "pnpm --filter @emberforge/$APP_TARGET start"]

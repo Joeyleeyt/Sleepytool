@@ -1,0 +1,18 @@
+app = "emberforge-veo3-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  APP_TARGET = "veo3-worker"
+
+# Veo 3 jobs are long-running (60-180s each). Concurrency 20 per machine
+# inside the worker process means each machine can hold many in-flight jobs.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+[deploy]
+  strategy = "rolling"

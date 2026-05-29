@@ -1,0 +1,41 @@
+{
+  "name": "emberforge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cinematic AI long-form video generation platform",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev --parallel",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules",
+    "db:generate": "pnpm --filter @emberforge/db generate",
+    "db:migrate": "pnpm --filter @emberforge/db migrate",
+    "api:dev": "pnpm --filter @emberforge/api dev",
+    "orchestrator:dev": "pnpm --filter @emberforge/orchestrator dev",
+    "workers:dev": "pnpm --parallel --filter \"@emberforge/*-worker\" dev",
+    "web:dev": "pnpm --filter @emberforge/web dev",
+    "stack:dev": "pnpm --parallel --filter \"@emberforge/api\" --filter \"@emberforge/orchestrator\" --filter \"@emberforge/*-worker\" --filter \"@emberforge/web\" dev",
+    "infra:up": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down -v && docker compose up -d",
+    "bootstrap": "pnpm install && pnpm infra:up",
+    "fly:create": "pwsh scripts/fly/create.ps1",
+    "fly:secrets": "pwsh scripts/fly/secrets.ps1",
+    "fly:deploy": "pwsh scripts/fly/deploy.ps1",
+    "fly:deploy:api": "pwsh scripts/fly/deploy.ps1 -Only api",
+    "fly:deploy:orchestrator": "pwsh scripts/fly/deploy.ps1 -Only orchestrator",
+    "fly:deploy:workers": "pwsh scripts/fly/deploy.ps1 -Only workers"
+  },
+  "devDependencies": {
+    "turbo": "^2.1.3",
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.2",
+    "@types/node": "^20.16.11"
+  }
+}

@@ -1,0 +1,28 @@
+# Local dev infrastructure: Redis only.
+#
+# Postgres now lives on Supabase — see README for setup. Redis stays local
+# because BullMQ wants low-latency pub/sub and Supabase doesn't host Redis.
+# For production Redis, use Upstash and point REDIS_URL at it.
+#
+# Bring up:  docker compose up -d
+# Tear down: docker compose down
+# Wipe data: docker compose down -v
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: emberforge-redis
+    restart: unless-stopped
+    ports:
+      # Host 6381 → container 6379 (6379 is taken by another project on this machine)
+      - "6381:6379"
+    volumes:
+      - emberforge_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  emberforge_redis:

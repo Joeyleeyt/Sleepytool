@@ -1,0 +1,18 @@
+app = "emberforge-labs-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  APP_TARGET = "labs-worker"
+
+# 69labs image/video generation. I/O bound — high concurrency per machine,
+# but scale horizontally on queue depth.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+
+[deploy]
+  strategy = "rolling"

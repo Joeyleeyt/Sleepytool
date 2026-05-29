@@ -1,0 +1,5 @@
+{
+  "name": "@emberforge/scripts",
+  "private": true,
+  "type": "module"
+}

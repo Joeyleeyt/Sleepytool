@@ -1,0 +1,25 @@
+app = "emberforge-render-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile.render"
+
+[env]
+  NODE_ENV = "production"
+  APP_TARGET = "render-worker"
+  RENDER_WORK_DIR = "/data/emberforge"
+  # Flip to "true" only on GPU machines that have NVENC available.
+  NVENC_ENABLED = "false"
+
+# CPU encode default. Resize VM bigger for higher throughput, or switch to a
+# GPU machine (size = "l40s") + flip NVENC_ENABLED=true for ~10x speedup.
+[[vm]]
+  size = "performance-2x"
+  memory = "8gb"
+
+[mounts]
+  source = "render_work"
+  destination = "/data"
+
+[deploy]
+  strategy = "rolling"
