@@ -18,7 +18,7 @@ import { Badge } from '@/components/primitives/Badge';
 import { cn } from '@/lib/utils';
 import { api, type ShotWithAssets } from '@/lib/api';
 
-const SOURCE_ICON: Record<string, React.ComponentType<{ size?: number; className?: string }>> = {
+const SOURCE_ICON: Record<string, React.ElementType> = {
   cinematic_video: Film,
   image_with_motion: ImageIcon,
   atmospheric_broll: Sparkles,

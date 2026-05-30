@@ -23,4 +23,33 @@ export const promptsRepo = {
       .limit(1);
     return row ?? null;
   },
+
+  async findById(id: string) {
+    const [row] = await db.select().from(prompts).where(eq(prompts.id, id)).limit(1);
+    return row ?? null;
+  },
+
+  async findByShot(shotId: string) {
+    return db.select().from(prompts).where(eq(prompts.shotId, shotId));
+  },
+
+  /**
+   * Patch the prompt text / negative for a prompt row. This is the
+   * "user override" path — the worker still looks up the row by
+   * (shotId, target) and uses promptText verbatim, so future regenerations
+   * pick up the new text automatically.
+   *
+   * Note: inputHash is NOT recomputed here. That means a re-run with the
+   * same hash would still hit the R2 cache and reuse the old asset. The
+   * caller (UI) is expected to delete the existing asset row first so the
+   * worker treats the next attempt as a fresh generation.
+   */
+  async update(id: string, patch: { promptText?: string; negative?: string | null }) {
+    const [row] = await db
+      .update(prompts)
+      .set(patch)
+      .where(eq(prompts.id, id))
+      .returning();
+    return row ?? null;
+  },
 };

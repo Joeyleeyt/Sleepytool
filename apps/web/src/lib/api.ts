@@ -1,10 +1,11 @@
 /**
- * Typed fetch wrappers for the EmberForge API. All calls go through
- * /api/ef/* which is rewritten to the API host (see next.config.mjs).
+ * Typed fetch wrappers for the EmberForge API. The API now lives in this
+ * Next.js app under /api/v1/* (Route Handlers — see app/api/). Routes are
+ * same-origin so no CORS / proxy plumbing is required.
  */
 import type { ProjectStatus, VisualType, AssetKind } from '@emberforge/core';
 
-const BASE = '/api/ef';
+const BASE = '/api';
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   // Fastify's application/json parser rejects empty bodies with 400. For
@@ -113,6 +114,43 @@ export const api = {
   replayStage: (id: string, stage: string) =>
     http<{ ok: boolean }>(`/v1/projects/${id}/replay/${stage}`, { method: 'POST' }),
 
+  // Partial update for editable project fields (style preset, title, etc.).
+  updateProject: (
+    id: string,
+    patch: { title?: string; stylePreset?: string; targetRes?: '1920x1080' | '3840x2160'; targetFps?: 24 | 30 | 60 },
+  ) =>
+    http<Project>(`/v1/projects/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  // Phase 2 — kicks off classify + prompt after the user has reviewed scenes.
+  planShots: (id: string) =>
+    http<{ ok: boolean; projectId: string }>(`/v1/projects/${id}/plan-shots`, { method: 'POST' }),
+
+  // Phase 3 — kicks off per-shot 69labs/Veo 3/TTS fan-out after the user has
+  // reviewed shot prompts.
+  generateAssets: (id: string) =>
+    http<{ ok: boolean; projectId: string }>(`/v1/projects/${id}/generate-assets`, { method: 'POST' }),
+
+  // Phase 4 — kicks off timeline build + render + publish after the user has
+  // reviewed every generated asset.
   startRender: (id: string) =>
     http<{ ok: boolean; projectId: string }>(`/v1/projects/${id}/render`, { method: 'POST' }),
+
+  // Prompt overrides — used by the Studio shot editor so the operator can
+  // tweak the generated prompt before paying to regenerate the asset.
+  getShotPrompts: (shotId: string) =>
+    http<{ shotId: string; prompts: ShotPrompt[] }>(`/v1/shots/${shotId}/prompts`),
+
+  updatePrompt: (id: string, patch: { promptText?: string; negative?: string | null }) =>
+    http<ShotPrompt>(`/v1/prompts/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 };
+
+export interface ShotPrompt {
+  id: string;
+  shotId: string;
+  target: string;
+  promptText: string;
+  negative: string | null;
+  params: Record<string, unknown> | null;
+  inputHash: string;
+  createdAt: string;
+}

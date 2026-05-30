@@ -45,7 +45,7 @@ export function RenderBanner() {
         <Button size="sm" onClick={() => setOpen(true)}>
           <Play size={13} /> Watch
         </Button>
-        <Button size="sm" variant="primary" asChild={false} onClick={() => window.open(render.url, '_blank')}>
+        <Button size="sm" variant="primary" onClick={() => window.open(render.url, '_blank')}>
           <Download size={13} /> Download
         </Button>
       </div>

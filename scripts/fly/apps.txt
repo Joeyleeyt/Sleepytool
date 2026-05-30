@@ -1,6 +1,7 @@
 # EmberForge Fly apps. Each line:  <app-name>  <fly-toml>
 # Used by scripts/fly/*.{sh,ps1} to iterate over the fleet.
-emberforge-api               infra/fly/api.fly.toml
+# Web + API now ship together on Vercel — Fly only hosts the long-lived
+# orchestrator + workers.
 emberforge-orchestrator      infra/fly/orchestrator.fly.toml
 emberforge-labs-worker       infra/fly/labs-worker.fly.toml
 emberforge-tts-worker        infra/fly/tts-worker.fly.toml

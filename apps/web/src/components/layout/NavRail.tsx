@@ -6,7 +6,9 @@ import { cn } from '@/lib/utils';
 
 interface Item {
   href: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  // Loose enough to accept lucide-react's forwardRef icon components whose
+  // `size` prop accepts string | number.
+  icon: React.ElementType;
   label: string;
 }
 

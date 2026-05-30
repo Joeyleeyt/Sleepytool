@@ -41,6 +41,23 @@ export const projectsRepo = {
   async setStatus(id: string, status: ProjectStatus) {
     await db.update(projects).set({ status, updatedAt: new Date() }).where(eq(projects.id, id));
   },
+
+  async update(
+    id: string,
+    patch: {
+      title?: string;
+      stylePreset?: string;
+      targetRes?: '1920x1080' | '3840x2160';
+      targetFps?: 24 | 30 | 60;
+    },
+  ) {
+    const [row] = await db
+      .update(projects)
+      .set({ ...patch, updatedAt: new Date() })
+      .where(eq(projects.id, id))
+      .returning();
+    return row ?? null;
+  },
 };
 
 export const transcriptsRepo = {

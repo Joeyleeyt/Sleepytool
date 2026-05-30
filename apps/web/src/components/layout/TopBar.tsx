@@ -2,10 +2,11 @@
 import Link from 'next/link';
 import { useRouter, useParams, usePathname } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, ScrollText, LayoutGrid, Film, Play, Loader2, ExternalLink } from 'lucide-react';
+import { ArrowLeft, ScrollText, LayoutGrid, Film, Play, Loader2, ExternalLink, ArrowRight, Wand2, Pin, PinOff } from 'lucide-react';
 import { Button } from '@/components/primitives/Button';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
+import { useAutoRedirectEnabled } from '@/lib/autoRedirect';
 import type { ProjectStatus } from '@emberforge/core';
 
 const MODES = [
@@ -14,11 +15,14 @@ const MODES = [
   { key: 'timeline', label: 'Timeline', icon: Film },
 ] as const;
 
-// Status sets that drive the Render button state machine.
-const RENDERABLE: ReadonlySet<ProjectStatus> = new Set([
-  'assets_ready',
-  'published',
-  'failed',
+// Statuses where the next-step button is actionable — user clicks to advance.
+// Drives the "primary" filled variant for visual emphasis.
+const ACTIONABLE: ReadonlySet<ProjectStatus> = new Set([
+  'segmented',     // → plan-shots
+  'prompted',      // → generate-assets
+  'assets_ready',  // → render
+  'published',     // → open final
+  'failed',        // → retry render
 ]);
 const RENDERING: ReadonlySet<ProjectStatus> = new Set([
   'timeline_built',
@@ -33,6 +37,7 @@ export function TopBar() {
   const params = useParams() as { projectId?: string };
   const projectId = params.projectId ?? '';
   const qc = useQueryClient();
+  const [autoRedirect, setAutoRedirect] = useAutoRedirectEnabled();
 
   const { data: project } = useQuery({
     queryKey: ['project', projectId],
@@ -46,6 +51,16 @@ export function TopBar() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['project', projectId] }),
   });
 
+  const planShots = useMutation({
+    mutationFn: () => api.planShots(projectId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['project', projectId] }),
+  });
+
+  const generateAssets = useMutation({
+    mutationFn: () => api.generateAssets(projectId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['project', projectId] }),
+  });
+
   const openFinal = useMutation({
     mutationFn: () => api.getRenderUrl(projectId),
     onSuccess: ({ url }) => {
@@ -56,7 +71,7 @@ export function TopBar() {
   const currentMode = MODES.find((m) => path.includes(`/${m.key}`))?.key ?? 'script';
 
   const status = project?.status as ProjectStatus | undefined;
-  const isRenderable = !!status && RENDERABLE.has(status);
+  const isActionable = !!status && ACTIONABLE.has(status);
   const isRendering = !!status && RENDERING.has(status);
   const isPublished = status === 'published';
   const isFailed = status === 'failed';
@@ -88,17 +103,46 @@ export function TopBar() {
     title = `Pipeline at: ${status}`;
   } else if (status === 'assets_ready') {
     label = 'Render final video';
+    icon = <Play size={13} />;
     action = () => startRender.mutate();
     disabled = startRender.isPending;
     title = 'Build timeline, mix audio, composite, encode, publish';
-  } else {
-    // ingested / analyzed / segmented / classified / prompted / generating_assets
+  } else if (status === 'segmented') {
+    // Phase 2 gate — user reviewed scenes, kick off classify + prompt
+    label = 'Plan shots';
+    icon = <ArrowRight size={13} />;
+    action = () => planShots.mutate();
+    disabled = planShots.isPending;
+    title = 'Classify each scene into shots and build per-shot prompts';
+  } else if (status === 'prompted') {
+    // Phase 3 gate — user reviewed shot prompts, fan out asset generation
+    label = 'Generate assets';
+    icon = <Wand2 size={13} />;
+    action = () => generateAssets.mutate();
+    disabled = generateAssets.isPending;
+    title = 'Generate AI images and video clips for every shot';
+  } else if (status === 'generating_assets') {
     label = 'Generating assets…';
     icon = <Loader2 size={13} className="animate-spin" />;
-    title = `Waiting for assets to finish (current: ${status ?? 'unknown'})`;
+    title = 'Waiting for per-shot AI generation to finish';
+  } else if (status === 'ingested' || status === 'analyzed') {
+    label = 'Analyzing transcript…';
+    icon = <Loader2 size={13} className="animate-spin" />;
+    title = `Pipeline at: ${status}`;
+  } else if (status === 'classified') {
+    label = 'Building prompts…';
+    icon = <Loader2 size={13} className="animate-spin" />;
+    title = `Pipeline at: ${status}`;
+  } else {
+    label = 'Working…';
+    icon = <Loader2 size={13} className="animate-spin" />;
+    title = `Pipeline at: ${status ?? 'unknown'}`;
   }
 
-  const renderError = (startRender.error as Error | null)?.message;
+  const renderError =
+    (startRender.error as Error | null)?.message ??
+    (planShots.error as Error | null)?.message ??
+    (generateAssets.error as Error | null)?.message;
 
   return (
     <header className="h-14 shrink-0 flex items-center justify-between gap-4 px-4 border-b border-border bg-bg-subtle">
@@ -137,8 +181,26 @@ export function TopBar() {
             {renderError}
           </span>
         )}
+        <button
+          type="button"
+          onClick={() => setAutoRedirect(!autoRedirect)}
+          className={cn(
+            'h-7 px-2 rounded text-[11px] flex items-center gap-1.5 border transition-colors',
+            autoRedirect
+              ? 'border-border bg-bg-elev text-text-dim hover:text-text'
+              : 'border-ember-500 bg-ember-500/10 text-ember-500',
+          )}
+          title={
+            autoRedirect
+              ? 'Auto-redirect ON — UI follows the pipeline through phases. Click to pin the current page.'
+              : 'Pinned — pipeline can advance but you stay on this page. Click to re-enable auto-redirect.'
+          }
+        >
+          {autoRedirect ? <PinOff size={12} /> : <Pin size={12} />}
+          {autoRedirect ? 'Auto' : 'Pinned'}
+        </button>
         <Button
-          variant={isRenderable && !disabled ? 'primary' : 'secondary'}
+          variant={isActionable && !disabled ? 'primary' : 'secondary'}
           size="sm"
           disabled={disabled || !action}
           onClick={action}

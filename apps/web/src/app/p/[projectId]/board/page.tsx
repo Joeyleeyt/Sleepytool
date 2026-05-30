@@ -7,6 +7,7 @@ import { ThreePane } from '@/components/layout/ThreePane';
 import { SceneCard } from '@/components/scene/SceneCard';
 import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
+import { PhaseBanner } from '@/components/layout/PhaseBanner';
 import { api } from '@/lib/api';
 import { formatUsd } from '@/lib/utils';
 
@@ -62,6 +63,7 @@ export default function BoardPage() {
       }
     >
       <div className="h-full flex flex-col min-h-0">
+        <PhaseBanner surface="board" />
         <div className="h-12 shrink-0 flex items-center gap-2 px-4 border-b border-border bg-bg-subtle">
           <Filter size={14} className="text-text-dim" />
           <FilterTab label="All" count={counts.all} active={filter === 'all'} onClick={() => setFilter('all')} />

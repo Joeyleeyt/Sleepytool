@@ -5,7 +5,7 @@
 # Skips local-only vars (PORT, DATABASE_URL pointing to localhost, etc).
 #
 # Usage:  pwsh scripts/fly/secrets.ps1
-#         pwsh scripts/fly/secrets.ps1 -App emberforge-api    # one app only
+#         pwsh scripts/fly/secrets.ps1 -App emberforge-orchestrator  # one app only
 
 param(
   [string]$App = ''

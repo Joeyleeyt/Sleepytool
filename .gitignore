@@ -1,20 +1,34 @@
 node_modules/
 dist/
+build/
+out/
 .turbo/
 .next/
+
+# All env files except a checked-in template (.env.example if you ever add one)
 .env
-.env.local
+.env.*
+!.env.example
+
 *.log
 .DS_Store
+Thumbs.db
 coverage/
 tmp/
 .tsbuildinfo
 *.tsbuildinfo
 
-# Render artifacts
+# Render artifacts — FFmpeg scratch dir, generated per project, can be GBs each
 renders/
 fx-cache/
+.render-work/
+**/.render-work/
+
+# Vercel CLI local state
+.vercel/
 
 # Editor
 .vscode/
 .idea/
+*.swp
+*~

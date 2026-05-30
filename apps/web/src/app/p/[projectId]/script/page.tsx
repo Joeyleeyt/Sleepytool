@@ -3,6 +3,7 @@ import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { ThreePane } from '@/components/layout/ThreePane';
 import { Badge } from '@/components/primitives/Badge';
+import { PhaseBanner } from '@/components/layout/PhaseBanner';
 import { api } from '@/lib/api';
 import { STAGE_LABELS, formatDuration, formatUsd } from '@/lib/utils';
 
@@ -46,8 +47,9 @@ export default function ScriptPage() {
         </div>
       }
     >
-      <div className="h-full overflow-y-auto">
-        <div className="max-w-3xl mx-auto px-8 py-10">
+      <div className="h-full flex flex-col min-h-0">
+        <PhaseBanner surface="script" />
+        <div className="flex-1 overflow-y-auto"><div className="max-w-3xl mx-auto px-8 py-10">
           {scenes.length === 0 ? (
             <div className="text-text-dim">
               <h2 className="font-display text-xl mb-2">Analyzing transcript…</h2>
@@ -69,7 +71,7 @@ export default function ScriptPage() {
               ))}
             </div>
           )}
-        </div>
+        </div></div>
       </div>
     </ThreePane>
   );

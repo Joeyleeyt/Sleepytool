@@ -1,14 +1,15 @@
-# Deploy one or all EmberForge apps to Fly.io.
+# Deploy one or all EmberForge apps to Fly.io. Web + API now live on Vercel —
+# Fly only hosts the long-lived orchestrator + workers.
 #
 # Usage:
-#   pwsh scripts/fly/deploy.ps1                            # deploy all
-#   pwsh scripts/fly/deploy.ps1 -App emberforge-api        # deploy one
-#   pwsh scripts/fly/deploy.ps1 -Only workers              # api+orchestrator skipped
-#   pwsh scripts/fly/deploy.ps1 -Only render               # render-worker only
+#   pwsh scripts/fly/deploy.ps1                                  # deploy all
+#   pwsh scripts/fly/deploy.ps1 -App emberforge-orchestrator     # deploy one
+#   pwsh scripts/fly/deploy.ps1 -Only workers                    # orchestrator skipped
+#   pwsh scripts/fly/deploy.ps1 -Only render                     # render-worker only
 
 param(
   [string]$App = '',
-  [string]$Only = ''   # 'workers' | 'render' | 'api' | 'orchestrator'
+  [string]$Only = ''   # 'workers' | 'render' | 'orchestrator'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,7 +29,6 @@ try {
     switch ($Only) {
         'workers'      { $apps = $apps | Where-Object { $_.Name -like '*-worker' } }
         'render'       { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-render-worker' } }
-        'api'          { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-api' } }
         'orchestrator' { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-orchestrator' } }
     }
 

@@ -1,9 +1,10 @@
-# EmberForge shared image — used by api, orchestrator, labs-worker, tts-worker, veo3-worker.
+# EmberForge shared image — used by orchestrator, labs-worker, tts-worker, veo3-worker.
 # render-worker uses Dockerfile.render (includes ffmpeg).
+# Web + API now ship together on Vercel; Fly only hosts the long-lived workers.
 #
 # The APP_TARGET build arg / env var selects which pnpm workspace runs:
-#   docker build --build-arg APP_TARGET=api .
-#   fly deploy -c infra/fly/api.fly.toml
+#   docker build --build-arg APP_TARGET=orchestrator .
+#   fly deploy -c infra/fly/orchestrator.fly.toml
 #
 # Fly.io reads APP_TARGET from each app's [env] block in its fly.toml.
 
@@ -20,7 +21,6 @@ WORKDIR /app
 
 # Install deps first so layer is cached across source changes
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* turbo.json tsconfig.base.json ./
-COPY apps/api/package.json apps/api/
 COPY apps/orchestrator/package.json apps/orchestrator/
 COPY apps/workers/labs-worker/package.json apps/workers/labs-worker/
 COPY apps/workers/tts-worker/package.json apps/workers/tts-worker/
@@ -45,7 +45,7 @@ COPY infra infra
 COPY scripts scripts
 
 ENV NODE_ENV=production
-ENV APP_TARGET=api
+ENV APP_TARGET=orchestrator
 
 # tini for proper signal handling so BullMQ workers shut down cleanly
 ENTRYPOINT ["/usr/bin/tini", "--"]
