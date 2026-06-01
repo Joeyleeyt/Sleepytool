@@ -18,7 +18,8 @@ export async function buildImagePrompt(opts: {
     palette.lighting,
     palette.ambient,
     `${palette.grade} color grade`,
-    'still frame, photoreal, hyperdetailed, cinematic composition, no text, no logos',
+    'still frame, photoreal, hyperdetailed, cinematic composition',
+    'clean full-frame edge-to-edge composition, no on-screen text or captions, no watermark or logo, no camera UI or HUD, no REC indicator, no timestamp, no viewfinder or focus reticle, no film border or letterbox bars',
   ].filter((x): x is string => Boolean(x));
 
   return {

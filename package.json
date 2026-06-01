@@ -24,11 +24,11 @@
     "infra:down": "docker compose down",
     "infra:reset": "docker compose down -v && docker compose up -d",
     "bootstrap": "pnpm install && pnpm infra:up",
-    "fly:create": "pwsh scripts/fly/create.ps1",
-    "fly:secrets": "pwsh scripts/fly/secrets.ps1",
-    "fly:deploy": "pwsh scripts/fly/deploy.ps1",
-    "fly:deploy:orchestrator": "pwsh scripts/fly/deploy.ps1 -Only orchestrator",
-    "fly:deploy:workers": "pwsh scripts/fly/deploy.ps1 -Only workers"
+    "fly:create": "powershell -ExecutionPolicy Bypass -File scripts/fly/create.ps1",
+    "fly:secrets": "powershell -ExecutionPolicy Bypass -File scripts/fly/secrets.ps1",
+    "fly:deploy": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1",
+    "fly:deploy:orchestrator": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1 -Only orchestrator",
+    "fly:deploy:workers": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1 -Only workers"
   },
   "devDependencies": {
     "turbo": "^2.1.3",

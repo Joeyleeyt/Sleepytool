@@ -17,6 +17,7 @@ export function buildAtmosphericPrompt(opts: {
     palette.lighting,
     `${palette.grade} color grade`,
     'cinematic, premium documentary feel',
+    'clean full-frame edge-to-edge composition, no on-screen text or captions, no watermark or logo, no camera UI or HUD, no REC indicator, no timestamp, no viewfinder or focus reticle, no film border or letterbox bars',
   ].join(', ');
   return { prompt, negative: palette.negative };
 }

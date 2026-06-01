@@ -19,7 +19,8 @@ export async function buildVeo3Prompt(opts: {
     palette.ambient,
     palette.lighting,
     `${palette.grade} color grade`,
-    'photoreal, hyperdetailed, 35mm film texture, shallow depth of field, cinematic composition, 8K source quality',
+    'photoreal, hyperdetailed, shallow depth of field, cinematic composition, 8K source quality',
+    'clean full-frame edge-to-edge composition, no on-screen text or captions, no watermark or logo, no camera UI or HUD, no REC indicator, no timestamp, no viewfinder or focus reticle, no film border or letterbox bars',
   ].filter((x): x is string => Boolean(x));
 
   return {

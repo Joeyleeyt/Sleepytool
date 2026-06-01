@@ -12,36 +12,49 @@ import { fileURLToPath } from 'node:url';
 // the file directly gives us a single, visible log line confirming it worked.
 // =============================================================================
 {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const envPath = path.resolve(here, '../../.env');
-  try {
-    const content = readFileSync(envPath, 'utf8');
-    let loaded = 0;
-    for (const rawLine of content.split(/\r?\n/)) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith('#')) continue;
-      const eq = line.indexOf('=');
-      if (eq < 0) continue;
-      const key = line.slice(0, eq).trim();
-      let value = line.slice(eq + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
+  // Vercel + most managed CI inject env vars from a dashboard; there's no
+  // root-level .env file in those build containers. Skip the local-file load
+  // entirely so we don't spam a confusing "could NOT load .env" warning in
+  // production builds.
+  const onManagedCi = !!(
+    process.env.VERCEL ||
+    process.env.CI ||
+    process.env.GITHUB_ACTIONS ||
+    process.env.NETLIFY ||
+    process.env.RAILWAY_ENVIRONMENT
+  );
+  if (!onManagedCi) {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const envPath = path.resolve(here, '../../.env');
+    try {
+      const content = readFileSync(envPath, 'utf8');
+      let loaded = 0;
+      for (const rawLine of content.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const eq = line.indexOf('=');
+        if (eq < 0) continue;
+        const key = line.slice(0, eq).trim();
+        let value = line.slice(eq + 1).trim();
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
+          value = value.slice(1, -1);
+        }
+        // Don't override anything the parent shell already exported — same
+        // precedence Node's --env-file uses.
+        if (!(key in process.env)) {
+          process.env[key] = value;
+          loaded += 1;
+        }
       }
-      // Don't override anything the parent shell already exported — same
-      // precedence Node's --env-file uses.
-      if (!(key in process.env)) {
-        process.env[key] = value;
-        loaded += 1;
-      }
+      // eslint-disable-next-line no-console
+      console.log(`[next.config] loaded ${loaded} env var(s) from ${envPath}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[next.config] .env not found at ${envPath} — using process env only. (${err.message})`);
     }
-    // eslint-disable-next-line no-console
-    console.log(`[next.config] loaded ${loaded} env var(s) from ${envPath}`);
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(`[next.config] could NOT load .env from ${envPath}:`, err.message);
   }
 }
 

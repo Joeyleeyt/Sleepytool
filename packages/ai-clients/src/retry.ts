@@ -7,10 +7,39 @@ interface RetryOpts {
   retriable?: (err: unknown) => boolean;
 }
 
+const TRANSIENT_CODES = new Set([
+  'ETIMEDOUT',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  // undici socket errors — see https://github.com/nodejs/undici/blob/main/types/errors.d.ts
+  'UND_ERR_SOCKET',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_RESPONSE_TIMEOUT',
+]);
+
+const TRANSIENT_MESSAGE_PATTERNS = [
+  // undici wraps socket EOF as plain TypeError without a code; the message
+  // is our only signal that the remote end hung up mid-request.
+  /other side closed/i,
+  /socket hang up/i,
+  /Premature close/i,
+  /fetch failed/i,
+];
+
 const defaultRetriable = (err: unknown): boolean => {
-  const e = err as { status?: number; code?: string };
-  if (e?.code === 'ETIMEDOUT' || e?.code === 'ECONNRESET' || e?.code === 'ECONNREFUSED') return true;
+  const e = err as { status?: number; code?: string; message?: string; cause?: unknown };
+  if (e?.code && TRANSIENT_CODES.has(e.code)) return true;
   if (e?.status && [408, 425, 429, 500, 502, 503, 504].includes(e.status)) return true;
+  // undici puts the real network error on `.cause`; check it the same way.
+  if (e?.cause) {
+    const c = e.cause as { code?: string; message?: string };
+    if (c.code && TRANSIENT_CODES.has(c.code)) return true;
+    if (c.message && TRANSIENT_MESSAGE_PATTERNS.some((re) => re.test(c.message!))) return true;
+  }
+  if (e?.message && TRANSIENT_MESSAGE_PATTERNS.some((re) => re.test(e.message!))) return true;
   return false;
 };
 
