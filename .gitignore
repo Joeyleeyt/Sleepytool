@@ -19,10 +19,23 @@ tmp/
 *.tsbuildinfo
 
 # Render artifacts — FFmpeg scratch dir, generated per project, can be GBs each
+# Match both the leading-dot variant (`.render-work`) and the bare variant
+# (`render-work`) that the worker creates at relative paths.
 renders/
 fx-cache/
 .render-work/
 **/.render-work/
+render-work/
+**/render-work/
+
+# Diff / patch files often dropped by `git diff > x.patch` or review tooling
+*.patch
+*.diff
+
+# Misc local dev junk
+.DS_Store
+.cache/
+.review-diff.patch
 
 # Vercel CLI local state
 .vercel/

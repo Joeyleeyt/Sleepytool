@@ -20,4 +20,16 @@ export const shotsRepo = {
     const [row] = await db.select().from(shots).where(eq(shots.id, id)).limit(1);
     return row ?? null;
   },
+
+  /**
+   * Overwrite per-shot `duration_s` after the narration-timing pass measures
+   * the real per-scene TTS duration. Called once per shot with the
+   * proportionally redistributed seconds.
+   */
+  async setDuration(id: string, durationS: number) {
+    await db
+      .update(shots)
+      .set({ durationS: String(durationS) })
+      .where(eq(shots.id, id));
+  },
 };

@@ -64,10 +64,54 @@ export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
   ];
 
   try {
-    await ffmpeg(args);
+    try {
+      await ffmpeg(args);
+    } catch (err) {
+      // NVENC fails on machines without a recent NVIDIA GPU + drivers — the
+      // error usually mentions "No NVENC capable devices found",
+      // "h264_nvenc", or "Cannot load nvcuda". Retry with libx264 transparently
+      // so a render never aborts because of a missing GPU.
+      const msg = (err as Error).message ?? String(err);
+      const isNvenc =
+        opts.nvenc &&
+        /nvenc|nvcuda|cuda|gpu/i.test(msg) &&
+        !/permission|disk full/i.test(msg);
+      if (!isNvenc) throw err;
+      // eslint-disable-next-line no-console
+      console.warn('[finalEncode] NVENC failed, retrying with libx264. Reason:', msg.slice(0, 200));
+      const fallback = args.map((a) => (a === 'h264_nvenc' ? 'libx264' : a));
+      // Replace NVENC-specific flags with x264 equivalents.
+      const cleaned = stripNvencFlagsKeepX264(fallback, x264Preset, x264Crf);
+      await ffmpeg(cleaned);
+    }
   } finally {
     if (safeSubs) await rm(safeSubs, { force: true }).catch(() => {});
   }
+}
+
+function stripNvencFlagsKeepX264(args: string[], preset: string, crf: string): string[] {
+  // Drop NVENC-only flags (-rc / -cq / -maxrate / -bufsize / -b:v) and add
+  // libx264's -preset / -crf in their place. The first appearance of the
+  // codec arg (h264_nvenc → libx264) was already rewritten by the caller.
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '-rc' || a === '-cq' || a === '-maxrate' || a === '-bufsize' || a === '-b:v') {
+      i++; // skip the value
+      continue;
+    }
+    if (a === '-preset') {
+      out.push('-preset', preset);
+      i++;
+      continue;
+    }
+    out.push(a);
+  }
+  if (!out.includes('-crf')) {
+    const insertAt = out.indexOf('-preset') + 2;
+    out.splice(insertAt > 1 ? insertAt : out.length - 1, 0, '-crf', crf);
+  }
+  return out;
 }
 
 function escapeForFilter(p: string): string {

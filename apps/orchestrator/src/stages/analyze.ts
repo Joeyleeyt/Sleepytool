@@ -4,13 +4,20 @@ import { ANALYZE_SYSTEM, rememberEntity } from '@emberforge/prompt-engine';
 import { TranscriptAnalysisSchema } from '@emberforge/core/schemas';
 
 export async function analyzeStage(projectId: string) {
+  const started = Date.now();
+  // eslint-disable-next-line no-console
+  console.log(`[analyze] start projectId=${projectId}`);
   await eventsRepo.emit(projectId, 'analyze', 'started');
 
   try {
     const transcript = await transcriptsRepo.findByProject(projectId);
     if (!transcript) throw new Error('transcript not found');
+    // eslint-disable-next-line no-console
+    console.log(`[analyze] transcript loaded len=${transcript.rawText.length}ch words=${transcript.wordCount ?? '?'}`);
 
     if (transcript.analysisJson) {
+      // eslint-disable-next-line no-console
+      console.log('[analyze] cached — skipping LLM call');
       await eventsRepo.emit(projectId, 'analyze', 'cached');
       await projectsRepo.setStatus(projectId, 'analyzed');
       return { cached: true };
@@ -27,6 +34,11 @@ export async function analyzeStage(projectId: string) {
       maxTokens: 8_000,
       cacheSystem: true,
     });
+    // eslint-disable-next-line no-console
+    console.log(
+      `[analyze] LLM ok entities=${analysis.recurringEntities.length} arc=${analysis.arc.length} ` +
+        `topic="${analysis.globalTopic.slice(0, 60)}"`,
+    );
 
     await transcriptsRepo.saveAnalysis(transcript.id, analysis);
 
@@ -42,12 +54,16 @@ export async function analyzeStage(projectId: string) {
 
     await projectsRepo.setStatus(projectId, 'analyzed');
     await eventsRepo.emit(projectId, 'analyze', 'succeeded', { entities: analysis.recurringEntities.length });
+    // eslint-disable-next-line no-console
+    console.log(`[analyze] done projectId=${projectId} ${Date.now() - started}ms`);
     return analysis;
   } catch (err) {
     // Surface the error in the events log so the UI / API can see what broke
     // instead of the project sitting at "analyze.started" forever. Re-throw
     // so BullMQ still marks the job failed and applies its retry policy.
     const e = err as { message?: string; status?: number };
+    // eslint-disable-next-line no-console
+    console.error(`[analyze] FAILED projectId=${projectId} ${Date.now() - started}ms: ${e.message ?? String(err)}`);
     await eventsRepo.emit(projectId, 'analyze', 'failed', {
       message: e.message ?? String(err),
       status: e.status,

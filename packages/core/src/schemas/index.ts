@@ -25,7 +25,9 @@ export const SceneAnalysisSchema = z.object({
   tension: z.number().min(0).max(1),
   atmosphere: z.string(),
   visualOpportunities: z.array(z.string()),
-  timelineMarker: z.string().optional(),
+  // Nullable AND optional so both the Claude path (omits when absent) and
+  // the OpenAI Structured Outputs path (returns explicit null) parse cleanly.
+  timelineMarker: z.string().nullable().optional(),
   concepts: z.object({
     scientific: z.array(z.string()),
     abstract: z.array(z.string()),

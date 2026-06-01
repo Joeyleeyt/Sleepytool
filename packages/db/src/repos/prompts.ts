@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, desc, eq, ne } from 'drizzle-orm';
 import { db } from '../client.js';
-import { prompts } from '../schema/index.js';
+import { prompts, shots } from '../schema/index.js';
 
 export const promptsRepo = {
   async upsert(row: typeof prompts.$inferInsert) {
@@ -31,6 +31,31 @@ export const promptsRepo = {
 
   async findByShot(shotId: string) {
     return db.select().from(prompts).where(eq(prompts.shotId, shotId));
+  },
+
+  /**
+   * Visual prompts (everything except the TTS prompt) for every shot in a
+   * project. One query, used by /scenes so the board can show a per-shot
+   * prompt preview without 1 fetch per card.
+   *
+   * Ordered by createdAt DESC so the caller (which collapses to one prompt
+   * per shotId in a Map) deterministically keeps the MOST RECENT prompt row
+   * — important when DISABLE_VEO3 flips mid-project and a shot ends up with
+   * both a stale veo3 row and a fresh 69labs.video row.
+   */
+  async findVisualByProject(projectId: string) {
+    return db
+      .select({
+        id: prompts.id,
+        shotId: prompts.shotId,
+        target: prompts.target,
+        promptText: prompts.promptText,
+        negative: prompts.negative,
+      })
+      .from(prompts)
+      .innerJoin(shots, eq(shots.id, prompts.shotId))
+      .where(and(eq(shots.projectId, projectId), ne(prompts.target, '69labs.tts')))
+      .orderBy(desc(prompts.createdAt));
   },
 
   /**

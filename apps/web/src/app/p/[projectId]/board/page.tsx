@@ -9,7 +9,6 @@ import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
 import { PhaseBanner } from '@/components/layout/PhaseBanner';
 import { api } from '@/lib/api';
-import { formatUsd } from '@/lib/utils';
 
 type StatusFilter = 'all' | 'ready' | 'pending' | 'partial';
 
@@ -179,7 +178,6 @@ function BulkInspector({ selectedCount, onClear }: { selectedCount: number; onCl
         <Button className="w-full justify-start">Force visual type…</Button>
       </div>
 
-      <div className="text-xs text-text-faint">Cost preview: <span className="text-text-dim font-mono">{formatUsd(selectedCount * 0.04)}</span></div>
     </div>
   );
 }

@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { ProgressBar } from '@/components/primitives/ProgressBar';
 import { Badge } from '@/components/primitives/Badge';
-import { STAGE_LABELS, TERMINAL_STATUSES, formatUsd } from '@/lib/utils';
+import { STAGE_LABELS, TERMINAL_STATUSES } from '@/lib/utils';
 
 const PIPELINE_STAGES = [
   'ingested', 'analyzed', 'segmented', 'classified', 'prompted',
@@ -54,7 +54,6 @@ export function StatusBar() {
         Assets {data.shots.ready}/{data.shots.total}
         {data.shots.failed > 0 && <span className="text-bad ml-2">⚠ {data.shots.failed} failed</span>}
       </div>
-      <div className="text-text-dim font-mono">{formatUsd(data.cost.totalUsd)}</div>
     </div>
   );
 }

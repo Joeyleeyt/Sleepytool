@@ -5,7 +5,7 @@ import { NavRail } from '@/components/layout/NavRail';
 import { Badge } from '@/components/primitives/Badge';
 import { ProgressBar } from '@/components/primitives/ProgressBar';
 import { api } from '@/lib/api';
-import { STAGE_LABELS, TERMINAL_STATUSES, formatUsd } from '@/lib/utils';
+import { STAGE_LABELS, TERMINAL_STATUSES } from '@/lib/utils';
 
 export default function QueuePage() {
   const { data, isLoading } = useQuery({ queryKey: ['projects'], queryFn: api.listProjects, refetchInterval: 3000 });
@@ -53,7 +53,6 @@ function QueueRow({ projectId, title, status }: { projectId: string; title: stri
           <Badge tone="busy">{STAGE_LABELS[status] ?? status}</Badge>
           <span className="text-sm font-medium">{title}</span>
         </div>
-        <span className="text-xs text-text-faint font-mono">{formatUsd(data?.cost?.totalUsd ?? 0)}</span>
       </div>
       <div className="mt-3">
         <ProgressBar value={pct} tone="busy" />

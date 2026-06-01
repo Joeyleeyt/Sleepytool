@@ -68,7 +68,6 @@ new Worker(
 
       await generationsRepo.markSucceeded(generation.id, {
         providerJobId: result.providerJobId,
-        costUsd: result.costUsd,
         latencyMs: Date.now() - t0,
       });
       await eventsRepo.emit(projectId, 'tts', 'succeeded', { shotId, durationS: result.durationS });

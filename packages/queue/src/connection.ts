@@ -14,11 +14,32 @@ let cached: Redis | null = null;
 
 export function getConnection(): Redis {
   if (cached) return cached;
-  const url = process.env.REDIS_URL ?? 'redis://localhost:6379';
+  const url = (process.env.REDIS_URL ?? 'redis://localhost:6379').trim();
+  const isTls = url.startsWith('rediss://');
+  // `family: 0` (dual-stack) only on Windows — there `localhost`/Upstash DNS
+  // prefers IPv6 first and gets EACCES on v4-only endpoints. On Linux/macOS,
+  // forcing dual-stack changes resolution order in container networks (e.g.
+  // IPv6-disabled CI hosts) and can SLOW connect or spam reconnect errors.
+  // Override with REDIS_FAMILY=0|4|6 if you need to pin it explicitly.
+  const familyEnv = process.env.REDIS_FAMILY;
+  const family =
+    familyEnv != null && familyEnv !== ''
+      ? (Number(familyEnv) as 0 | 4 | 6)
+      : process.platform === 'win32'
+        ? 0
+        : undefined;
   cached = new IORedis(url, {
     maxRetriesPerRequest: null,
     enableReadyCheck: false,
     lazyConnect: false,
+    ...(family !== undefined ? { family } : {}),
+    ...(isTls ? { tls: {} } : {}),
+  });
+  cached.on('error', (err) => {
+    // BullMQ swallows connection errors silently — log them so workers don't
+    // appear to "just hang" when Redis is unreachable.
+    // eslint-disable-next-line no-console
+    console.error('[redis] connection error:', err.message);
   });
   return cached;
 }

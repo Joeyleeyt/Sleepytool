@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { CreateProjectSchema } from '@emberforge/core/schemas';
 import { eventsRepo, projectsRepo, transcriptsRepo } from '@emberforge/db';
 import { startAnalysisFlow } from '@emberforge/queue';
+import { parseJsonBody } from '@/lib/httpBody';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,7 +15,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const body = CreateProjectSchema.parse(await request.json());
+  const body = await parseJsonBody(request, CreateProjectSchema);
+  if (body instanceof NextResponse) return body;
   const project = await projectsRepo.create({
     ownerId: DEV_OWNER_ID,
     title: body.title,

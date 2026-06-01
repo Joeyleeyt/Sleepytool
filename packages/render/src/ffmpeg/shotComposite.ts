@@ -181,5 +181,32 @@ export async function compositeShot(opts: ShotCompositeOpts): Promise<void> {
     opts.outPath,
   ];
 
-  await ffmpeg(args);
+  try {
+    await ffmpeg(args);
+  } catch (err) {
+    // Same fallback as finalEncode.ts — if NVENC isn't usable on this host,
+    // retry with libx264 so a render doesn't die on a per-shot composite.
+    const msg = (err as Error).message ?? String(err);
+    const isNvenc =
+      opts.nvenc &&
+      /nvenc|nvcuda|cuda|gpu/i.test(msg) &&
+      !/permission|disk full/i.test(msg);
+    if (!isNvenc) throw err;
+    // eslint-disable-next-line no-console
+    console.warn('[compositeShot] NVENC failed, retrying with libx264. Reason:', msg.slice(0, 200));
+    const fallback = [
+      ...inputs,
+      '-filter_complex', filters.join(';'),
+      '-map', '[final]',
+      '-map', '[narration]',
+      '-t', String(opts.durationS),
+      '-c:v', 'libx264',
+      '-preset', x264Preset, '-crf', x264Crf,
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-movflags', '+faststart',
+      opts.outPath,
+    ];
+    await ffmpeg(fallback);
+  }
 }

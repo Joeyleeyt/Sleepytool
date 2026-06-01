@@ -12,7 +12,6 @@ export const renders = pgTable('renders', {
   r2Key: text('r2_key'),
   durationS: numeric('duration_s', { precision: 8, scale: 2 }),
   bitrateKbps: integer('bitrate_kbps'),
-  costUsd: numeric('cost_usd', { precision: 8, scale: 4 }),
   log: text('log'),
   startedAt: timestamp('started_at', { withTimezone: true }),
   finishedAt: timestamp('finished_at', { withTimezone: true }),

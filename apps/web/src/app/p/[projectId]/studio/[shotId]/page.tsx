@@ -6,13 +6,6 @@ import { X, Play, Sparkles, Film, Image as ImageIcon, Save, Loader2 } from 'luci
 import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
 import { api, type ShotPrompt } from '@/lib/api';
-import { formatUsd } from '@/lib/utils';
-
-const COSTS: Record<string, number> = {
-  cinematic_video: 1.2,
-  atmospheric_broll: 0.8,
-  image_with_motion: 0.04,
-};
 
 const TTS_TARGET = '69labs.tts';
 
@@ -108,7 +101,6 @@ export default function StudioPage() {
               </div>
               <div className="mt-2 flex items-center justify-between text-xs text-text-faint">
                 <span>v1 selected</span>
-                <span className="font-mono">cost: $4.80</span>
               </div>
             </section>
           </div>
@@ -170,9 +162,9 @@ export default function StudioPage() {
             <section>
               <h3 className="text-xs uppercase tracking-wider text-text-faint mb-2">Model</h3>
               <div className="space-y-1.5">
-                <ModelOption icon={Film} label="Veo 3" cost={COSTS.cinematic_video!} eta="60s" selected={shot?.visualType === 'cinematic_video'} />
-                <ModelOption icon={Sparkles} label="69labs video" cost={COSTS.atmospheric_broll!} eta="40s" selected={shot?.visualType === 'atmospheric_broll'} />
-                <ModelOption icon={ImageIcon} label="69labs image" cost={COSTS.image_with_motion!} eta="6s" selected={shot?.visualType === 'image_with_motion'} />
+                <ModelOption icon={Film} label="Veo 3" eta="60s" selected={shot?.visualType === 'cinematic_video'} />
+                <ModelOption icon={Sparkles} label="69labs video" eta="40s" selected={shot?.visualType === 'atmospheric_broll'} />
+                <ModelOption icon={ImageIcon} label="69labs image" eta="6s" selected={shot?.visualType === 'image_with_motion'} />
               </div>
             </section>
           </div>
@@ -185,15 +177,11 @@ export default function StudioPage() {
 function ModelOption({
   icon: Icon,
   label,
-  cost,
   eta,
   selected,
 }: {
-  // Loose enough to accept the lucide-react `forwardRef` icon components
-  // whose `size` prop accepts string | number, not strictly number.
   icon: React.ElementType;
   label: string;
-  cost: number;
   eta: string;
   selected?: boolean;
 }) {
@@ -202,7 +190,7 @@ function ModelOption({
       <input type="radio" name="model" defaultChecked={selected} disabled className="accent-ember-500" />
       <Icon size={14} className="text-text-dim" />
       <span className="text-xs flex-1">{label}</span>
-      <span className="text-[11px] text-text-faint font-mono">~{formatUsd(cost)} · {eta}</span>
+      <span className="text-[11px] text-text-faint font-mono">{eta}</span>
     </label>
   );
 }

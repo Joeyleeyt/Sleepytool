@@ -115,7 +115,7 @@ export function TopBar() {
     disabled = planShots.isPending;
     title = 'Classify each scene into shots and build per-shot prompts';
   } else if (status === 'prompted') {
-    // Phase 3 gate — user reviewed shot prompts, fan out asset generation
+    // Phase 3 gate — user reviewed shot prompts, fan out asset generation.
     label = 'Generate assets';
     icon = <Wand2 size={13} />;
     action = () => generateAssets.mutate();

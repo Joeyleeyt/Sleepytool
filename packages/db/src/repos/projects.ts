@@ -17,7 +17,10 @@ export const projectsRepo = {
         ownerId: input.ownerId,
         title: input.title,
         stylePreset: input.stylePreset ?? 'cinematic_dark_ember',
-        targetRes: input.targetRes ?? '3840x2160',
+        // 1920×1080 is YouTube's standard upload — fits a 16:9 player at full
+        // HD and renders 3-4× faster than 4K. Bump to '3840x2160' per project
+        // (via PATCH /projects/:id) for 4K masters.
+        targetRes: input.targetRes ?? '1920x1080',
         targetFps: input.targetFps ?? 30,
       })
       .returning();
@@ -67,7 +70,7 @@ export const transcriptsRepo = {
     const [row] = await db
       .insert(transcripts)
       .values({ projectId: input.projectId, rawText: input.rawText, wordCount, estDurationS })
-      .returning();
+      .returning();      
     return row!;
   },
 

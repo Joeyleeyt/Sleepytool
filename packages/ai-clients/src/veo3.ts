@@ -16,7 +16,6 @@ export interface Veo3GenerateInput {
 export interface Veo3Result {
   videoUrl: string;
   durationS: number;
-  costUsd: number;
   providerJobId: string;
 }
 
@@ -52,7 +51,7 @@ export async function generateVideo(input: Veo3GenerateInput): Promise<Veo3Resul
       if (poll.statusCode >= 400) throw Object.assign(new Error('veo3 poll'), { status: poll.statusCode });
       const body = (await poll.body.json()) as {
         done?: boolean;
-        response?: { videoUri: string; durationSec: number; usage?: { cost?: number } };
+        response?: { videoUri: string; durationSec: number };
         error?: { message: string };
       };
       if (body.error) throw new Error(`veo3: ${body.error.message}`);
@@ -60,16 +59,10 @@ export async function generateVideo(input: Veo3GenerateInput): Promise<Veo3Resul
         return {
           videoUrl: body.response.videoUri,
           durationS: body.response.durationSec,
-          costUsd: body.response.usage?.cost ?? estimateCost(input.durationS ?? 8, input.resolution ?? '1080p'),
           providerJobId: name,
         };
       }
     }
     throw new Error('veo3 timeout');
   });
-}
-
-function estimateCost(durationS: number, resolution: '1080p' | '4k'): number {
-  const perSec = resolution === '4k' ? 0.35 : 0.15;
-  return durationS * perSec;
 }

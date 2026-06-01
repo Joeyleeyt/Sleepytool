@@ -21,7 +21,6 @@ export interface Generation {
   providerJobId: string | null;
   status: GenStatus;
   attempt: number;
-  costUsd: number | null;
   latencyMs: number | null;
   error: Record<string, unknown> | null;
   startedAt: Date | null;

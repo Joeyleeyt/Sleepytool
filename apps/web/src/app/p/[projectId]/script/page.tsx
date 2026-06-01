@@ -5,7 +5,7 @@ import { ThreePane } from '@/components/layout/ThreePane';
 import { Badge } from '@/components/primitives/Badge';
 import { PhaseBanner } from '@/components/layout/PhaseBanner';
 import { api } from '@/lib/api';
-import { STAGE_LABELS, formatDuration, formatUsd } from '@/lib/utils';
+import { STAGE_LABELS, formatDuration } from '@/lib/utils';
 
 export default function ScriptPage() {
   const { projectId } = useParams() as { projectId: string };
@@ -15,12 +15,6 @@ export default function ScriptPage() {
     queryFn: () => api.getScenes(projectId),
     refetchInterval: 5000,
   });
-  const { data: progress } = useQuery({
-    queryKey: ['progress', projectId],
-    queryFn: () => api.getProgress(projectId),
-    refetchInterval: 3000,
-  });
-
   const scenes = scenesData?.scenes ?? [];
   const totalShots = scenes.reduce((n, s) => n + s.shots.length, 0);
   const totalDur = scenes.reduce((sum, s) => sum + Number(s.estimatedDurS ?? 0), 0);
@@ -34,7 +28,6 @@ export default function ScriptPage() {
             <Stat label="Scenes" value={scenes.length} />
             <Stat label="Shots" value={totalShots} />
             <Stat label="Runtime" value={formatDuration(totalDur)} />
-            <Stat label="Cost" value={formatUsd(progress?.cost?.totalUsd ?? 0)} />
           </div>
           <div className="space-y-2">
             <h3 className="text-xs uppercase tracking-wider text-text-faint">Style</h3>
@@ -85,3 +78,4 @@ function Stat({ label, value }: { label: string; value: string | number }) {
     </div>
   );
 }
+

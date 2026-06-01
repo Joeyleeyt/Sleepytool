@@ -10,8 +10,7 @@
  *
  * We expose a synchronous-looking surface (`labs69.image({...})`) that
  * internally does the full submit → poll → resolve-redirect dance and returns
- * a `{ url, costUsd, providerJobId, durationS? }` shape so the workers stay
- * unchanged.
+ * a `{ url, providerJobId, durationS? }` shape so the workers stay unchanged.
  */
 import { Agent, setGlobalDispatcher } from 'undici';
 import { withRetry } from './retry.js';
@@ -75,8 +74,6 @@ interface JobStatusResp {
 interface BaseResult {
   /** Presigned URL the worker should download (resolved from the 302). */
   url: string;
-  /** USD cost — null because the API exposes credits, not USD. */
-  costUsd: number | null;
   /** The 69labs job id, kept for traceability. */
   providerJobId: string;
   /** Optional duration in seconds (for video/audio). */
@@ -200,7 +197,6 @@ export const labs69 = {
     const url = await resolveDownloadUrl(`/tts/download/${create.id}`);
     return {
       url,
-      costUsd: null,
       providerJobId: create.id,
       // outputMetadata is optional on TTS; estimate duration from text if absent
       durationS: done.outputMetadata?.durationSeconds ?? estimateTtsDurationS(input.text),
@@ -229,7 +225,6 @@ export const labs69 = {
     const url = await resolveDownloadUrl(`/images/download/${create.id}`);
     return {
       url,
-      costUsd: null,
       providerJobId: create.id,
       metadata: {
         format: done.outputMetadata?.format ?? 'png',
@@ -281,7 +276,6 @@ export const labs69 = {
     const url = await resolveDownloadUrl(`/videos/download/${create.id}`);
     return {
       url,
-      costUsd: null,
       providerJobId: create.id,
       durationS: done.outputMetadata?.durationSeconds ?? (input.durationS ?? 8),
       metadata: {
@@ -304,7 +298,6 @@ export const labs69 = {
     const url = await resolveDownloadUrl(`/motion-graphics/download/${create.id}`);
     return {
       url,
-      costUsd: null,
       providerJobId: create.id,
       durationS: done.outputMetadata?.durationSeconds ?? 8,
       metadata: { format: 'mp4', templateId: input.templateId },

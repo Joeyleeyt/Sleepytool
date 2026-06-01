@@ -10,7 +10,6 @@ export const generations = pgTable('generations', {
   providerJobId: text('provider_job_id'),
   status: genStatusEnum('status').notNull().default('queued'),
   attempt: integer('attempt').notNull().default(1),
-  costUsd: numeric('cost_usd', { precision: 8, scale: 4 }),
   latencyMs: integer('latency_ms'),
   error: jsonb('error'),
   startedAt: timestamp('started_at', { withTimezone: true }),

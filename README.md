@@ -112,8 +112,7 @@ pnpm stack:dev
 ```
 
 Boots:
-- **Web UI** on `http://localhost:3000` ← open this
-- API on `http://localhost:8080`
+- **Web UI + API** on `http://localhost:3000` ← open this (API lives under `/api/v1/*` in the Next.js app)
 - Orchestrator + 4 workers in the background
 
 ### 6. Submit a transcript
@@ -131,7 +130,7 @@ The script POSTs the transcript, prints the `projectId`, and polls until status 
 ### 7. Replay a single stage (debugging)
 
 ```bash
-curl -X POST http://localhost:8080/v1/projects/<projectId>/replay/encode
+curl -X POST http://localhost:3000/api/v1/projects/<projectId>/replay/encode
 # valid stages: analyze, segment, classify, prompt, generateAssets,
 #               buildTimeline, mixAudio, composite, encode, publish
 ```

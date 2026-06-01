@@ -50,11 +50,23 @@ new Worker(
 
       const result =
         kind === 'image'
-          ? await labs69.image({ prompt: prompt.promptText, negative: prompt.negative ?? undefined })
+          ? await labs69.image({
+              prompt: prompt.promptText,
+              negative: prompt.negative ?? undefined,
+              // 16:9 fills a 1920×1080 frame edge-to-edge. 2k source (~2048×1152)
+              // gives Ken Burns zoompan ~15% headroom while staying sharp at
+              // the final 1080p target.
+              aspectRatio: '16:9',
+              resolution: '2k',
+            })
           : await labs69.video({
               prompt: prompt.promptText,
               negative: prompt.negative ?? undefined,
               durationS: Number(shot.durationS),
+              // Intentionally NOT passing aspectRatio / resolution — the
+              // default 69labs video model (Veo 3.1 Lite) rejects both with
+              // 400. Output is native 16:9 at the model's chosen size and
+              // gets scaled to the project's targetRes in the final encode.
             });
 
       const ext = kind === 'image' ? 'png' : 'mp4';
@@ -79,10 +91,9 @@ new Worker(
 
       await generationsRepo.markSucceeded(generation.id, {
         providerJobId: result.providerJobId,
-        costUsd: result.costUsd,
         latencyMs: Date.now() - t0,
       });
-      await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind, costUsd: result.costUsd });
+      await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind });
       return { assetId: asset.id };
     } catch (err) {
       await generationsRepo.markFailed(generation.id, { message: (err as Error).message });

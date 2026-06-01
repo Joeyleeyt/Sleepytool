@@ -15,4 +15,16 @@ export const scenesRepo = {
   async deleteByProject(projectId: string) {
     await db.delete(scenes).where(eq(scenes.projectId, projectId));
   },
+
+  /**
+   * Overwrite a scene's `estimated_dur_s` with a measured value. Used by the
+   * narration-timing stage to record the real per-scene TTS duration so the
+   * UI's "Runtime" stat and downstream estimates reflect actual pacing.
+   */
+  async setEstimatedDuration(id: string, durationS: number) {
+    await db
+      .update(scenes)
+      .set({ estimatedDurS: String(durationS) })
+      .where(eq(scenes.id, id));
+  },
 };

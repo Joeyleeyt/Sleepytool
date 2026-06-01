@@ -5,6 +5,7 @@ import { analyzeStage } from './stages/analyze.js';
 import { segmentStage } from './stages/segment.js';
 import { classifyStage } from './stages/classify.js';
 import { deterministicSegmentStage } from './stages/deterministicSegment.js';
+import { narrationTimingStage } from './stages/narrationTiming.js';
 import { promptStage } from './stages/prompt.js';
 import { generateAssetsStage } from './stages/generateAssets.js';
 import { buildTimelineStage } from './stages/buildTimeline.js';
@@ -59,7 +60,23 @@ const workers = [
     { connection, concurrency: 2 },
   ),
 
-  new Worker('prompt', async (job) => promptStage(job.data.projectId), { connection, concurrency: 4 }),
+  new Worker(
+    'prompt',
+    async (job) => {
+      const { projectId, stage } = job.data as { projectId: string; stage?: string };
+      // Default to 'prompt' so existing single-stage jobs (replay endpoint,
+      // any in-flight items from before the schema change) keep working.
+      switch (stage ?? 'prompt') {
+        case 'narrationTiming':
+          return narrationTimingStage(projectId);
+        case 'prompt':
+          return promptStage(projectId);
+        default:
+          throw new Error(`unknown prompt stage ${stage}`);
+      }
+    },
+    { connection, concurrency: 4 },
+  ),
 
   new Worker(
     'orchestrator',

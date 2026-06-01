@@ -24,10 +24,6 @@ export function formatRelative(date: Date | string | null | undefined): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-export function formatUsd(n: number): string {
-  return `$${n.toFixed(2)}`;
-}
-
 export const STAGE_LABELS: Record<string, string> = {
   ingested: 'Draft',
   analyzed: 'Analyzed',

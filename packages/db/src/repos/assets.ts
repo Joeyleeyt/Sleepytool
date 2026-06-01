@@ -21,4 +21,18 @@ export const assetsRepo = {
       .limit(1);
     return row ?? null;
   },
+
+  /**
+   * Delete asset row(s) for a shot (optionally narrowed by kind). Used by the
+   * retry endpoint so the worker's cache check misses and a fresh generation
+   * runs. The R2 object is NOT deleted — content-addressed keys mean a re-run
+   * with the same prompt would just upload over it; with an edited prompt the
+   * old object becomes unreferenced and can be cleaned by a separate sweep.
+   */
+  async deleteByShot(shotId: string, kind?: AssetKind) {
+    const where = kind
+      ? and(eq(assets.shotId, shotId), eq(assets.kind, kind))
+      : eq(assets.shotId, shotId);
+    return db.delete(assets).where(where);
+  },
 };

@@ -69,10 +69,9 @@ new Worker(
 
       await generationsRepo.markSucceeded(generation.id, {
         providerJobId: result.providerJobId,
-        costUsd: result.costUsd,
         latencyMs: Date.now() - t0,
       });
-      await eventsRepo.emit(projectId, 'veo3', 'succeeded', { shotId, costUsd: result.costUsd });
+      await eventsRepo.emit(projectId, 'veo3', 'succeeded', { shotId });
       return { assetId: asset.id };
     } catch (err) {
       await generationsRepo.markFailed(generation.id, { message: (err as Error).message });

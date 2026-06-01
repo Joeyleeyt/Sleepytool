@@ -6,7 +6,8 @@
  *   pnpm tsx scripts/project-stats.ts <projectId>
  */
 
-const API = process.env.EMBERFORGE_API ?? 'http://localhost:8080';
+// API now lives in the Next.js app under /api/v1/* (port 3000 in dev).
+const API = process.env.EMBERFORGE_API ?? 'http://localhost:3000';
 
 interface ShotAssets {
   visual: { id: string; kind: string; r2Key: string } | null;
@@ -29,7 +30,7 @@ const VIDEO_TYPES = new Set(['cinematic_video', 'atmospheric_broll', 'infographi
 async function pickProjectId(): Promise<string> {
   const arg = process.argv[2];
   if (arg) return arg;
-  const res = await fetch(`${API}/v1/projects`);
+  const res = await fetch(`${API}/api/v1/projects`);
   if (!res.ok) throw new Error(`listProjects ${res.status}`);
   const { projects } = (await res.json()) as { projects: Project[] };
   if (!projects.length) throw new Error('no projects yet — submit a transcript first');
@@ -37,7 +38,7 @@ async function pickProjectId(): Promise<string> {
 }
 
 const projectId = await pickProjectId();
-const res = await fetch(`${API}/v1/projects/${projectId}/scenes`);
+const res = await fetch(`${API}/api/v1/projects/${projectId}/scenes`);
 if (!res.ok) throw new Error(`getScenes ${res.status}: ${await res.text()}`);
 const { scenes } = (await res.json()) as ScenesResp;
 const shots: Shot[] = scenes.flatMap((s) => s.shots);

@@ -7,7 +7,10 @@ export interface SceneAnalysis {
   tension: number;
   atmosphere: string;
   visualOpportunities: string[];
-  timelineMarker?: string;
+  // string | null | undefined — OpenAI Structured Outputs returns explicit
+  // null for nullable+optional fields; Claude omits them entirely. Both shapes
+  // get stored on scenes.analysis verbatim.
+  timelineMarker?: string | null;
   concepts: { scientific: string[]; abstract: string[] };
 }
 

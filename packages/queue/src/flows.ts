@@ -51,18 +51,32 @@ export async function startAnalysisFlow(projectId: string) {
 /**
  * Phase 2 — user-triggered after reviewing scenes.
  *   prompt
- *     └── classify
+ *     └── narrationTiming      (NEW: per-scene 69labs TTS to measure real
+ *           └── classify        durations, redistributed to shot.duration_s)
+ *
+ * narrationTiming runs after classify so the per-scene narration_chunk and
+ * its constituent shot.narration_text rows exist to be measured. Its result
+ * — measured per-scene seconds — is written back to scenes.estimated_dur_s
+ * and proportionally to each shot's duration_s, so downstream prompt /
+ * generate-assets / render see real timings instead of 150-wpm estimates.
  */
 export async function startShotPlanningFlow(projectId: string) {
   return flowProducer.add({
     name: 'prompt',
     queueName: 'prompt',
-    data: { projectId },
+    data: { projectId, stage: 'prompt' },
     children: [
       {
-        name: 'classify',
-        queueName: 'analysis',
-        data: { projectId, stage: 'classify' },
+        name: 'narrationTiming',
+        queueName: 'prompt',
+        data: { projectId, stage: 'narrationTiming' },
+        children: [
+          {
+            name: 'classify',
+            queueName: 'analysis',
+            data: { projectId, stage: 'classify' },
+          },
+        ],
       },
     ],
   });

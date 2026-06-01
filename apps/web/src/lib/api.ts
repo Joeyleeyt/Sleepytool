@@ -64,17 +64,27 @@ export interface ShotWithAssets {
   transitionIn: string | null;
   transitionOut: string | null;
   soundtrackMood: string | null;
-  status: 'pending' | 'partial' | 'ready';
+  status: 'pending' | 'partial' | 'ready' | 'failed';
   assets: {
     visual: { id: string; kind: AssetKind; r2Key: string; durationS: string | null } | null;
     narration: { id: string; durationS: string | null } | null;
+  };
+  /** Visual prompt (Veo3 / 69labs.video / 69labs.image) — null before
+   *  Phase 2 (plan-shots) finishes. The TTS prompt is intentionally omitted
+   *  because the narration text is already on the shot itself. */
+  visualPrompt: { id: string; target: string; promptText: string; negative: string | null } | null;
+  /** Latest failure per leg, only present when the asset hasn't landed and a
+   *  prior generation failed all its BullMQ attempts. Drives the per-shot
+   *  retry button on /board. */
+  failures: {
+    visual: { provider: string; message: string; finishedAt: string | null } | null;
+    narration: { provider: string; message: string; finishedAt: string | null } | null;
   };
 }
 
 export interface Progress {
   status: ProjectStatus;
   shots: { total: number; ready: number; failed: number };
-  cost: { totalUsd: number; byProvider: Record<string, { cost: number; count: number }> };
   updatedAt: string;
 }
 
@@ -134,6 +144,15 @@ export const api = {
   // reviewed every generated asset.
   startRender: (id: string) =>
     http<{ ok: boolean; projectId: string }>(`/v1/projects/${id}/render`, { method: 'POST' }),
+
+  // Re-enqueue the leaf job(s) for a single shot. `legs` defaults to both.
+  // Deletes the corresponding asset rows server-side so the worker's cache
+  // miss → fresh generation.
+  retryShot: (shotId: string, legs?: ('visual' | 'narration')[]) =>
+    http<{ ok: boolean; shotId: string; enqueued: { leg: string; queue: string; name: string }[] }>(
+      `/v1/shots/${shotId}/retry`,
+      { method: 'POST', body: JSON.stringify(legs ? { legs } : {}) },
+    ),
 
   // Prompt overrides — used by the Studio shot editor so the operator can
   // tweak the generated prompt before paying to regenerate the asset.

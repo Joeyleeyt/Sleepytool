@@ -116,7 +116,6 @@ CREATE TABLE IF NOT EXISTS generations (
   provider_job_id TEXT,
   status          gen_status NOT NULL DEFAULT 'queued',
   attempt         INTEGER NOT NULL DEFAULT 1,
-  cost_usd        NUMERIC(8,4),
   latency_ms      INTEGER,
   error           JSONB,
   started_at      TIMESTAMPTZ,
@@ -158,7 +157,6 @@ CREATE TABLE IF NOT EXISTS renders (
   r2_key       TEXT,
   duration_s   NUMERIC(8,2),
   bitrate_kbps INTEGER,
-  cost_usd     NUMERIC(8,4),
   log          TEXT,
   started_at   TIMESTAMPTZ,
   finished_at  TIMESTAMPTZ
