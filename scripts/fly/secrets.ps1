@@ -40,9 +40,9 @@ foreach ($line in Get-Content $envFile) {
     $val = $t.Substring($eq + 1).Trim().Trim('"').Trim("'")
     if ($skip -contains $key) { continue }
     if (-not $val) { continue }
-    # Skip localhost DB / Redis URLs — Fly apps need a public DB
+    # Skip localhost DB / Redis URLs -- Fly apps need a public DB
     if (($key -eq 'DATABASE_URL' -or $key -eq 'REDIS_URL') -and ($val -like '*localhost*' -or $val -like '*127.0.0.1*')) {
-        Write-Host "Skipping $key — points at localhost (set a Supabase/Upstash URL for Fly)" -ForegroundColor Yellow
+        Write-Host "Skipping $key -- points at localhost (set a Supabase/Upstash URL for Fly)" -ForegroundColor Yellow
         continue
     }
     $secrets[$key] = $val
@@ -60,7 +60,7 @@ $apps = Get-Content (Join-Path $here 'apps.txt') |
 if ($App) { $apps = @($App) }
 
 foreach ($a in $apps) {
-    Write-Host "→ fly secrets set on $a" -ForegroundColor Cyan
+    Write-Host "-> fly secrets set on $a" -ForegroundColor Cyan
     $args = @('secrets', 'set', '--app', $a, '--stage')
     foreach ($k in $secrets.Keys) {
         $args += "$k=$($secrets[$k])"

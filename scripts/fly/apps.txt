@@ -1,9 +1,7 @@
 # EmberForge Fly apps. Each line:  <app-name>  <fly-toml>
 # Used by scripts/fly/*.{sh,ps1} to iterate over the fleet.
-# Web + API now ship together on Vercel — Fly only hosts the long-lived
-# orchestrator + workers.
-emberforge-orchestrator      infra/fly/orchestrator.fly.toml
-emberforge-labs-worker       infra/fly/labs-worker.fly.toml
-emberforge-tts-worker        infra/fly/tts-worker.fly.toml
-emberforge-veo3-worker       infra/fly/veo3-worker.fly.toml
-emberforge-render-worker     infra/fly/render-worker.fly.toml
+#
+# CONSOLIDATED: all 5 pipeline processes (orchestrator + 4 workers) now run as
+# process groups inside the single "sleepytool" app. See the [processes] block
+# in infra/fly/sleepytool.fly.toml. Web + API ship separately on Vercel.
+sleepytool      infra/fly/sleepytool.fly.toml

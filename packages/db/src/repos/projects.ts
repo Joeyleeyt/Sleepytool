@@ -2,6 +2,7 @@ import { desc, eq } from 'drizzle-orm';
 import type { ProjectStatus } from '@emberforge/core';
 import { db } from '../client.js';
 import { projects, transcripts } from '../schema/index.js';
+import { eventsRepo } from './events.js';
 
 export const projectsRepo = {
   async create(input: {
@@ -43,6 +44,12 @@ export const projectsRepo = {
 
   async setStatus(id: string, status: ProjectStatus) {
     await db.update(projects).set({ status, updatedAt: new Date() }).where(eq(projects.id, id));
+    // High-level state log: every status transition in the pipeline
+    // (analyze → … → audio_mixed → … → published) flows through here, so this
+    // is the one place that captures the project's state changes end-to-end.
+    // Emitted as a 'state' event with the new status, so the UI event feed has
+    // a single canonical timeline of where each project has been.
+    await eventsRepo.emit(id, 'state', status);
   },
 
   async update(

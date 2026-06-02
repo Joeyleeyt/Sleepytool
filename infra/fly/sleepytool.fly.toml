@@ -1,0 +1,61 @@
+# Consolidated EmberForge deploy: all 5 pipeline processes run inside ONE Fly
+# app ("sleepytool") as separate process groups instead of 5 separate apps.
+#
+#   orchestrator  BullMQ flow coordinator (must stay running)
+#   labs          69labs image/video jobs
+#   tts           69labs TTS jobs
+#   veo3          Veo 3 jobs (idle when DISABLE_VEO3=true)
+#   render        FFmpeg composite + encode  (needs ffmpeg + a mounted disk)
+#
+# Built from Dockerfile.render so every group has ffmpeg available (the non-
+# render groups simply don't use it). Each group's command overrides the
+# image CMD; secrets/env are shared across all groups in the app.
+#
+# Deploy:  fly deploy --app sleepytool --config infra/fly/sleepytool.fly.toml
+
+app = "sleepytool"
+primary_region = "iad"
+
+[build]
+  # Path is resolved relative to THIS toml's dir (infra/fly), so go up to the
+  # repo root where Dockerfile.render lives. Build context stays the repo root.
+  dockerfile = "../../Dockerfile.render"
+
+[env]
+  NODE_ENV = "production"
+  # Render worker scratch dir lives on the mounted volume. Harmless for the
+  # other groups, which ignore it.
+  RENDER_WORK_DIR = "/data/emberforge"
+  # Flip to "true" only on a GPU machine that actually has NVENC.
+  NVENC_ENABLED = "false"
+
+# One process group per pipeline role. The command replaces the Dockerfile CMD;
+# tini (the image ENTRYPOINT) still wraps it for clean BullMQ shutdown.
+[processes]
+  orchestrator = "pnpm --filter @emberforge/orchestrator start"
+  labs         = "pnpm --filter @emberforge/labs-worker start"
+  tts          = "pnpm --filter @emberforge/tts-worker start"
+  veo3         = "pnpm --filter @emberforge/veo3-worker start"
+  render       = "pnpm --filter @emberforge/render-worker start"
+
+# Scratch disk for ffmpeg work — attached ONLY to render machines.
+[mounts]
+  source = "render_work"
+  destination = "/data"
+  processes = ["render"]
+
+# Small shared VM for the coordinator + I/O-bound workers.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
+  processes = ["orchestrator", "labs", "tts", "veo3"]
+
+# Bigger VM for CPU video encoding. Resize later for more throughput, or move
+# to a GPU machine (size = "l40s") + NVENC_ENABLED=true for ~10x.
+[[vm]]
+  size = "performance-2x"
+  memory = "8gb" 
+  processes = ["render"]
+
+[deploy] 
+  strategy = "rolling"

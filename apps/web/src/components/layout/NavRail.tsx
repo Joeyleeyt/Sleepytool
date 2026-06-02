@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Library, ListChecks, Palette, Settings, HelpCircle, CircleUser, Flame } from 'lucide-react';
+import { Home, Library, ListChecks, Flame } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Item {
@@ -16,12 +16,6 @@ const TOP: Item[] = [
   { href: '/', icon: Home, label: 'Projects' },
   { href: '/library', icon: Library, label: 'Library' },
   { href: '/queue', icon: ListChecks, label: 'Render Queue' },
-  { href: '/style-presets', icon: Palette, label: 'Presets' },
-];
-const BOTTOM: Item[] = [
-  { href: '/settings', icon: Settings, label: 'Settings' },
-  { href: '/help', icon: HelpCircle, label: 'Help' },
-  { href: '/account', icon: CircleUser, label: 'Account' },
 ];
 
 export function NavRail() {
@@ -33,11 +27,6 @@ export function NavRail() {
       </Link>
       <div className="flex flex-col gap-1 mt-2 flex-1">
         {TOP.map((it) => (
-          <NavItem key={it.href} item={it} active={isActive(path, it.href)} />
-        ))}
-      </div>
-      <div className="flex flex-col gap-1 mb-3">
-        {BOTTOM.map((it) => (
           <NavItem key={it.href} item={it} active={isActive(path, it.href)} />
         ))}
       </div>

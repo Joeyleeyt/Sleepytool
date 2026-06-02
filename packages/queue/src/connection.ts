@@ -28,10 +28,34 @@ export function getConnection(): Redis {
       : process.platform === 'win32'
         ? 0
         : undefined;
+
+  // On Vercel only the FlowProducer runs (a non-blocking producer that enqueues
+  // pipeline jobs from the API routes) — never a Worker. So we can fail fast
+  // there: an unreachable / misconfigured REDIS_URL (e.g. a Fly-internal host
+  // or a non-TLS endpoint) must reject `flowProducer.add()` with a readable
+  // error instead of having ioredis queue the command and reconnect forever,
+  // which hangs the serverless function past maxDuration and surfaces as an
+  // opaque 504 FUNCTION_INVOCATION_TIMEOUT. This mirrors the DB connect_timeout
+  // fail-fast in packages/db/src/client.ts.
+  //
+  // Long-lived Fly workers MUST keep maxRetriesPerRequest: null (BullMQ requires
+  // it for the blocking BRPOPLPUSH/XREAD commands) and want forever-reconnect so
+  // a transient network blip doesn't kill the process.
+  const onVercel = !!process.env.VERCEL;
   cached = new IORedis(url, {
-    maxRetriesPerRequest: null,
+    maxRetriesPerRequest: onVercel ? 3 : null,
     enableReadyCheck: false,
     lazyConnect: false,
+    connectTimeout: Number(process.env.REDIS_CONNECT_TIMEOUT_MS ?? (onVercel ? 6000 : 10000)),
+    ...(onVercel
+      ? {
+          // Bound a hung command (no blocking commands run on Vercel) and give
+          // up reconnecting after a couple of attempts so the offline queue is
+          // flushed with an error rather than retried forever.
+          commandTimeout: Number(process.env.REDIS_COMMAND_TIMEOUT_MS ?? 10000),
+          retryStrategy: (times: number) => (times > 2 ? null : Math.min(times * 300, 1000)),
+        }
+      : {}),
     ...(family !== undefined ? { family } : {}),
     ...(isTls ? { tls: {} } : {}),
   });

@@ -1,15 +1,22 @@
-# Deploy one or all EmberForge apps to Fly.io. Web + API now live on Vercel —
-# Fly only hosts the long-lived orchestrator + workers.
+# Deploy the EmberForge app(s) to Fly.io. Web + API now live on Vercel -- Fly
+# only hosts the long-lived orchestrator + workers, all consolidated into the
+# single "sleepytool" app as process groups (see infra/fly/sleepytool.fly.toml).
 #
 # Usage:
-#   pwsh scripts/fly/deploy.ps1                                  # deploy all
-#   pwsh scripts/fly/deploy.ps1 -App emberforge-orchestrator     # deploy one
-#   pwsh scripts/fly/deploy.ps1 -Only workers                    # orchestrator skipped
-#   pwsh scripts/fly/deploy.ps1 -Only render                     # render-worker only
+#   pwsh scripts/fly/deploy.ps1                          # deploy all apps + groups
+#   pwsh scripts/fly/deploy.ps1 -App sleepytool          # one app (all its groups)
+#   pwsh scripts/fly/deploy.ps1 -Group workers           # only the 4 worker groups
+#   pwsh scripts/fly/deploy.ps1 -Group render            # only the render group
+#   pwsh scripts/fly/deploy.ps1 -Group orchestrator      # only the orchestrator
+#
+# -Group targets Fly process groups within an app via `--process-groups`, since
+# everything now lives in one app rather than separate per-role apps.
 
 param(
   [string]$App = '',
-  [string]$Only = ''   # 'workers' | 'render' | 'orchestrator'
+  # Process group(s) to deploy. 'workers' expands to all four worker groups.
+  # Accepts a comma list too, e.g. -Group 'labs,tts'. Empty = all groups.
+  [string]$Group = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,21 +33,34 @@ try {
         }
 
     if ($App)  { $apps = $apps | Where-Object { $_.Name -eq $App } }
-    switch ($Only) {
-        'workers'      { $apps = $apps | Where-Object { $_.Name -like '*-worker' } }
-        'render'       { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-render-worker' } }
-        'orchestrator' { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-orchestrator' } }
-    }
 
     if (-not $apps) {
         Write-Host "No apps matched filter" -ForegroundColor Red
         exit 1
     }
 
+    # Resolve -Group into a Fly --process-groups value. 'workers' is a shorthand
+    # for the four worker groups; everything else is passed through verbatim so
+    # any group name (or comma list) in the fly.toml [processes] block works.
+    $groups = ''
+    switch ($Group) {
+        ''        { $groups = '' }   # all groups
+        'workers' { $groups = 'labs,tts,veo3,render' }
+        default   { $groups = $Group }
+    }
+
     foreach ($a in $apps) {
         Write-Host ""
-        Write-Host "════════ $($a.Name) ════════" -ForegroundColor Cyan
-        & fly deploy --app $a.Name --config $a.Toml --remote-only | Out-Host
+        if ($groups) {
+            Write-Host "======== $($a.Name)  [groups: $groups] ========" -ForegroundColor Cyan
+        } else {
+            Write-Host "======== $($a.Name) ========" -ForegroundColor Cyan
+        }
+
+        $deployArgs = @('deploy', '--app', $a.Name, '--config', $a.Toml, '--remote-only')
+        if ($groups) { $deployArgs += @('--process-groups', $groups) }
+
+        & fly @deployArgs | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Host "deploy failed for $($a.Name)" -ForegroundColor Red
             exit $LASTEXITCODE

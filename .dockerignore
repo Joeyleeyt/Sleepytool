@@ -17,6 +17,12 @@ tmp
 **/tmp
 fx-cache
 renders
+# Local render scratch output (RENDER_WORK_DIR=./render-work). On Fly this lives
+# on the mounted volume at /data/emberforge, so it must never enter the image.
+render-work
+**/render-work
+.render-work
+**/.render-work
 *.log
 .DS_Store
 .vscode

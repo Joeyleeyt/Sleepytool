@@ -1,18 +1,16 @@
 'use client';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import {
   Film,
   Image as ImageIcon,
   Sparkles,
   MoreHorizontal,
-  AlertTriangle,
   CheckCircle2,
   Volume2,
   Play,
   Pause,
   RotateCcw,
-  RefreshCw,
 } from 'lucide-react';
 import { Badge } from '@/components/primitives/Badge';
 import { cn } from '@/lib/utils';
@@ -27,6 +25,16 @@ const SOURCE_ICON: Record<string, React.ElementType> = {
   motion_typography: Sparkles,
 };
 
+/** Trim a prompt to its first two sentences, appending an ellipsis when there's
+ *  more. Keeps every card's prompt preview to a consistent two-line glance;
+ *  the full text stays available via the element's title tooltip. */
+function abbreviatePrompt(text: string): string {
+  const trimmed = text.trim();
+  const sentences = trimmed.match(/[^.!?]+[.!?]+(?:\s|$)/g);
+  if (!sentences || sentences.length <= 2) return trimmed;
+  return `${sentences.slice(0, 2).join('').trim()} …`;
+}
+
 export function SceneCard({
   shot,
   sceneOrdinal,
@@ -40,26 +48,12 @@ export function SceneCard({
   onSelect?: (id: string, multi?: boolean) => void;
   onOpenStudio?: (id: string) => void;
 }) {
-  const qc = useQueryClient();
   const SourceIcon = SOURCE_ICON[shot.visualType] ?? Film;
   const isReady = shot.status === 'ready';
-  const isFailed = shot.status === 'failed';
-  const isGenerating = !isFailed && (shot.status === 'pending' || shot.status === 'partial');
+  // Anything not yet ready — including a failed leg, which the pipeline retries —
+  // presents as the shimmer "loading" state. The card never surfaces an error.
+  const isGenerating = !isReady;
 
-  // Which legs to retry — both by default, narrowed to whatever failed.
-  const failedLegs = [
-    shot.failures.visual ? ('visual' as const) : null,
-    shot.failures.narration ? ('narration' as const) : null,
-  ].filter((x): x is 'visual' | 'narration' => x !== null);
-
-  const retry = useMutation({
-    mutationFn: () => api.retryShot(shot.id, failedLegs.length ? failedLegs : undefined),
-    onSuccess: () => {
-      // Force /scenes to refetch so the failure pill disappears and the
-      // card flips back to the generating shimmer.
-      qc.invalidateQueries({ queryKey: ['scenes'] });
-    },
-  });
   const [hovered, setHovered] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [ended, setEnded] = useState(false);
@@ -222,7 +216,8 @@ export function SceneCard({
           </>
         ) : (
           <>
-            <AlertTriangle size={28} className="text-bad" />
+            <div className="absolute inset-0 shimmer" />
+            <SourceIcon size={28} className="relative" />
           </>
         )}
       </div>
@@ -238,10 +233,18 @@ export function SceneCard({
         <p className="mt-1.5 text-[13px] font-narration leading-snug text-text line-clamp-3">
           {shot.narrationText}
         </p>
-        {/* Visual prompt preview — only while the shot hasn't generated yet.
-            Lets the user scan all prompts on /board without opening Studio for
-            each one. Click the card → Studio for full editing. */}
-        {!isReady && shot.visualPrompt && (
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1">
+            {(shot.fxRecommendation as { embers?: string })?.embers && (shot.fxRecommendation as { embers?: string }).embers !== 'off' && (
+              <Badge tone="ember" className="lowercase">embers</Badge>
+            )}
+          </div>
+          <MoreHorizontal size={14} className="text-text-faint opacity-0 group-hover:opacity-100" />
+        </div>
+        {/* Visual prompt preview, pinned to the bottom of every card for a
+            consistent layout regardless of generation status. Abbreviated to
+            two sentences; click the card → Studio for full editing. */}
+        {shot.visualPrompt && (
           <div className="mt-2 rounded border border-border bg-bg-subtle/60 p-2">
             <div className="flex items-center justify-between gap-2 mb-1">
               <Badge tone="neutral" className="font-mono lowercase">
@@ -249,77 +252,14 @@ export function SceneCard({
               </Badge>
               <span className="text-[10px] text-text-faint">prompt</span>
             </div>
-            <p className="text-[11px] text-text-dim leading-snug line-clamp-3 font-mono">
-              {shot.visualPrompt.promptText}
+            <p
+              className="text-[11px] text-text-dim leading-snug line-clamp-2 font-mono"
+              title={shot.visualPrompt.promptText}
+            >
+              {abbreviatePrompt(shot.visualPrompt.promptText)}
             </p>
           </div>
         )}
-        {/* Failure reasons + per-shot retry. Shown only when status === 'failed',
-            i.e. at least one leg has a recorded failure and no successful asset
-            has covered it. The retry button re-enqueues just the failing legs. */}
-        {isFailed && (
-          <div className="mt-2 rounded border border-bad/40 bg-bad/5 p-2 space-y-1.5">
-            {shot.failures.visual && (
-              <FailureLine leg="visual" failure={shot.failures.visual} />
-            )}
-            {shot.failures.narration && (
-              <FailureLine leg="narration" failure={shot.failures.narration} />
-            )}
-            <button
-              type="button"
-              disabled={retry.isPending}
-              onClick={(e) => {
-                e.stopPropagation();
-                retry.mutate();
-              }}
-              className="mt-1 w-full h-7 inline-flex items-center justify-center gap-1.5 rounded bg-bad text-white text-[11px] font-medium hover:bg-bad/90 disabled:opacity-60 disabled:cursor-wait"
-            >
-              <RefreshCw size={11} className={retry.isPending ? 'animate-spin' : ''} />
-              {retry.isPending
-                ? 'Retrying…'
-                : failedLegs.length === 2
-                  ? 'Retry both'
-                  : `Retry ${failedLegs[0]}`}
-            </button>
-            {retry.error && (
-              <div className="text-[10px] text-bad">{(retry.error as Error).message}</div>
-            )}
-          </div>
-        )}
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1">
-            {(shot.fxRecommendation as { embers?: string })?.embers && (shot.fxRecommendation as { embers?: string }).embers !== 'off' && (
-              <Badge tone="ember" className="lowercase">embers</Badge>
-            )}
-            {isFailed && (
-              <Badge tone="bad">
-                <AlertTriangle size={9} className="mr-0.5" />
-                failed
-              </Badge>
-            )}
-          </div>
-          <MoreHorizontal size={14} className="text-text-faint opacity-0 group-hover:opacity-100" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FailureLine({
-  leg,
-  failure,
-}: {
-  leg: 'visual' | 'narration';
-  failure: { provider: string; message: string; finishedAt: string | null };
-}) {
-  return (
-    <div className="flex items-start gap-1.5">
-      <Badge tone="bad" className="font-mono lowercase shrink-0">{leg}</Badge>
-      <div className="min-w-0 flex-1">
-        <div className="text-[10px] text-text-faint font-mono">{failure.provider}</div>
-        <div className="text-[11px] text-bad leading-snug line-clamp-2" title={failure.message}>
-          {failure.message}
-        </div>
       </div>
     </div>
   );
