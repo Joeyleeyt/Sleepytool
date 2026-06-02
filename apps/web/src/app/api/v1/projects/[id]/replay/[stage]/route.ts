@@ -4,6 +4,7 @@ import { queues } from '@emberforge/queue';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const STAGE_DISPATCH: Record<
   string,

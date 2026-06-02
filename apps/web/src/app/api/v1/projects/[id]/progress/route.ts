@@ -4,6 +4,7 @@ import { assetsRepo, db, projectsRepo, schema, shotsRepo } from '@emberforge/db'
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 export async function GET(_request: Request, { params }: { params: { id: string } }) {
   const { id } = params;

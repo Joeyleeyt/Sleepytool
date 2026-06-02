@@ -6,6 +6,7 @@ import { reconcileAssetsReady, reconcileRenderPublished } from '@/lib/reconcile'
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const STYLE_PRESETS = ['cinematic_dark_ember', 'cosmic_minimal', 'noir_documentary', 'warm_archival'] as const;
 

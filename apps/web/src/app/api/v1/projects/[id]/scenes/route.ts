@@ -3,6 +3,7 @@ import { assetsRepo, generationsRepo, promptsRepo, scenesRepo, shotsRepo } from 
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 // Provider IDs are grouped into "visual" vs "narration" so the UI can show one
 // failure pill per affected leg even if the worker emits multiple attempts.

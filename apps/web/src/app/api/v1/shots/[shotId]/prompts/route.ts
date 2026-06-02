@@ -3,6 +3,7 @@ import { promptsRepo, shotsRepo } from '@emberforge/db';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 export async function GET(_request: Request, { params }: { params: { shotId: string } }) {
   const shot = await shotsRepo.findById(params.shotId);

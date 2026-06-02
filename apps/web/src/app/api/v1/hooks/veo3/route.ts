@@ -3,6 +3,7 @@ import { eventsRepo } from '@emberforge/db';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 /**
  * Veo 3 async-completion webhook. Polling inside the worker is still primary;

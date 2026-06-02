@@ -4,6 +4,7 @@ import { startGenerateAssetsFlow } from '@emberforge/queue';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const ALLOWED = new Set(['prompted', 'generating_assets', 'assets_ready', 'failed']);
 

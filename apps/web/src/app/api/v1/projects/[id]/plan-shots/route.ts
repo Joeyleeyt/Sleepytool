@@ -4,6 +4,7 @@ import { startShotPlanningFlow } from '@emberforge/queue';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 const ALLOWED = new Set(['segmented', 'classified', 'prompted', 'failed']);
 

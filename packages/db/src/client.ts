@@ -31,9 +31,16 @@ function getDb(): DrizzleDb {
     prepare: false,
     idle_timeout: 30,
     // Cold TCP+TLS to a distant Supabase region can take 5-10s; 15s left
-    // almost no margin for jitter. Bump to 60s so workers don't fail under
-    // transient network slowness.
-    connect_timeout: Number(process.env.DB_CONNECT_TIMEOUT_S ?? 60),
+    // almost no margin for jitter. Long-lived Fly workers want 60s so they
+    // don't fail under transient network slowness. On Vercel, though, the
+    // serverless function itself is killed at ~10s (FUNCTION_INVOCATION_TIMEOUT)
+    // — a 60s connect timeout there just turns a misconfigured DATABASE_URL
+    // (e.g. the IPv6-only `db.<ref>.supabase.co:5432` direct host, unreachable
+    // from Vercel) into an opaque 504 instead of a readable 500. Fail fast on
+    // Vercel so the real error surfaces in the function logs.
+    connect_timeout: Number(
+      process.env.DB_CONNECT_TIMEOUT_S ?? (process.env.VERCEL ? 8 : 60),
+    ),
     max_lifetime: 60 * 30, // recycle conns every 30min so pooler can rebalance
   });
   cached = drizzle(queryClient, { schema });

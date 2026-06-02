@@ -5,6 +5,7 @@ import { signGet } from '@emberforge/storage';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 30;
 
 export async function GET(_request: Request, { params }: { params: { id: string } }) {
   const [a] = await db.select().from(schema.assets).where(eq(schema.assets.id, params.id)).limit(1);
