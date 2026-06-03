@@ -1,0 +1,60 @@
+# fly.toml app configuration file generated for sleepytool on 2026-06-02T19:29:10+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'sleepytool'
+primary_region = 'lhr'
+
+[build]
+  dockerfile = '../../Dockerfile.render'
+
+[deploy]
+  strategy = 'immediate'
+
+[env]
+  NODE_ENV = 'production'
+  NVENC_ENABLED = 'false'
+  RENDER_WORK_DIR = '/data/emberforge'
+
+# Two process groups → two machines.
+#   workers — orchestrator + 69labs (labs/tts) + veo3 in ONE Node process.
+#             All four are I/O-bound BullMQ consumers (they wait on external
+#             HTTP APIs), so one process hosts them all with no CPU contention.
+#             See apps/workers/all/src/index.ts.
+#   render  — CPU-bound ffmpeg work; keeps the big VM + persistent volume.
+[processes]
+  workers = 'pnpm --filter @emberforge/workers start'
+  render = 'pnpm --filter @emberforge/render-worker start'
+
+[[mounts]]
+  source = 'render_work'
+  destination = '/data'
+  processes = ['render']
+  # A 2-hour 1080p job holds ~9gb assets + ~7gb master + ~7gb final + image
+  # intermediates (~25-30gb peak). Size with headroom so encode never hits
+  # ENOSPC. (initial_size only applies when Fly creates the volume.)
+  initial_size = '50gb'
+
+[[vm]]
+  # I/O-bound combined process (orchestrator + 69labs + veo3 — all wait on
+  # external HTTP). RAM, not CPU, is the constraint: veo3 (conc 4) and labs
+  # (conc 8) each buffer whole video downloads in memory. 6gb gives those
+  # buffers + Node heap ~3.7x headroom even at pessimistic clip sizes; raise
+  # LABS_CONCURRENCY past 8 only alongside more RAM here.
+  #
+  # NOTE: shared-cpu machines cap at 2gb RAM per vCPU, so 6gb REQUIRES
+  # shared-cpu-4x (max 8gb) — shared-cpu-2x would be rejected at 4gb max. The
+  # extra vCPUs are incidental (the work is I/O-bound); we're buying the RAM.
+  size = 'shared-cpu-4x'
+  memory = '6gb'
+  processes = ['workers']
+
+[[vm]]
+  # CPU-bound ffmpeg. With the stream-copy final mux (no GPU/NVENC), the only
+  # real encode is the parallel Ken Burns image segments — 8 cores serve that
+  # well; the rest of the pipeline is mux/I-O bound. 16gb covers ~8 parallel
+  # 1080p zoompan encodes with room to spare.
+  size = 'performance-8x'
+  memory = '16gb'
+  processes = ['render']

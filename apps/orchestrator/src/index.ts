@@ -1,6 +1,6 @@
 import pino from 'pino';
 import { Worker } from 'bullmq';
-import { connection } from '@emberforge/queue';
+import { workerOpts, connection } from '@emberforge/queue';
 import { analyzeStage } from './stages/analyze.js';
 import { segmentStage } from './stages/segment.js';
 import { classifyStage } from './stages/classify.js';
@@ -57,9 +57,12 @@ const workers = [
           throw new Error(`unknown analysis stage ${stage}`);
       }
     },
-    { connection, concurrency: 2 },
+    workerOpts({ concurrency: 2 }),
   ),
 
+  // Phases are user-gated and sequential — prompt then narrationTiming run one
+  // after another per project, never as a wide fan-out. concurrency 2 covers a
+  // couple of concurrent projects; more just idles.
   new Worker(
     'prompt',
     async (job) => {
@@ -75,7 +78,7 @@ const workers = [
           throw new Error(`unknown prompt stage ${stage}`);
       }
     },
-    { connection, concurrency: 4 },
+    workerOpts({ concurrency: 2 }),
   ),
 
   new Worker(
@@ -88,23 +91,24 @@ const workers = [
       return null;
     },
     // Concurrency must be ≥ max concurrent projects, because generateAssets
-    // blocks for the full duration of asset generation.
-    { connection, concurrency: 8 },
+    // blocks for the full duration of asset generation. Sized for low-volume
+    // sequential operation — 3 concurrent projects in the asset-gen phase.
+    workerOpts({ concurrency: 3 }),
   ),
 
-  new Worker('timeline', async (job) => buildTimelineStage(job.data.projectId), { connection, concurrency: 2 }),
+  new Worker('timeline', async (job) => buildTimelineStage(job.data.projectId), workerOpts({ concurrency: 1 })),
 
   // 'audio' is a placeholder stage — the render-worker does the actual
   // audio mix inside its `encode` job. We still need a consumer here so
   // BullMQ marks the flow node complete and unblocks the next stage.
-  new Worker('audio', async (job) => mixAudioStage(job.data.projectId), { connection, concurrency: 1 }),
+  new Worker('audio', async (job) => mixAudioStage(job.data.projectId), workerOpts({ concurrency: 1 })),
 
   // IMPORTANT: NO 'render' queue worker here. The render-worker
   // (apps/workers/render-worker) is the sole consumer of `render` jobs —
   // it owns ffmpeg + the heavy work. Adding one here would race with the
   // render-worker for jobs and the no-op version would win.
 
-  new Worker('publish', async (job) => publishStage(job.data.projectId), { connection, concurrency: 2 }),
+  new Worker('publish', async (job) => publishStage(job.data.projectId), { connection, concurrency: 1 }),
 ];
 
 for (const w of workers) {

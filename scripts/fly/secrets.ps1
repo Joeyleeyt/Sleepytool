@@ -1,11 +1,12 @@
-# Push secrets from .env into every Fly app.
+# Push secrets from .env into the EmberForge Fly app (sleepytool).
 # Reads .env at repo root, skips comments + blank lines, and sets each KEY=VALUE
-# as a Fly secret on every app listed in scripts/fly/apps.txt.
+# as a Fly secret on every app listed in scripts/fly/apps.txt. Secrets apply to
+# all of an app's process groups.
 #
 # Skips local-only vars (PORT, DATABASE_URL pointing to localhost, etc).
 #
 # Usage:  pwsh scripts/fly/secrets.ps1
-#         pwsh scripts/fly/secrets.ps1 -App emberforge-orchestrator  # one app only
+#         pwsh scripts/fly/secrets.ps1 -App sleepytool  # one app only
 
 param(
   [string]$App = ''
@@ -25,8 +26,8 @@ if (-not (Test-Path $envFile)) {
 $skip = @(
     'PORT', 'LOG_LEVEL', 'NODE_ENV',
     'FFMPEG_PATH', 'FFPROBE_PATH',           # Fly image has its own ffmpeg
-    'RENDER_WORK_DIR',                       # set in render-worker fly.toml
-    'NVENC_ENABLED',                         # set per fly.toml
+    'RENDER_WORK_DIR',                       # set in sleepytool.fly.toml (render)
+    'NVENC_ENABLED',                         # set in sleepytool.fly.toml
     'FX_LIBRARY_DIR'                         # path is image-local
 )
 

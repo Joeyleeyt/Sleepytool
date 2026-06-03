@@ -1,5 +1,5 @@
-# Creates the six EmberForge Fly apps. Idempotent — `fly apps create` errors
-# politely on apps that already exist.
+# Creates the EmberForge Fly app (sleepytool). Idempotent — `fly apps create`
+# errors politely if it already exists.
 #
 # Usage:  pwsh scripts/fly/create.ps1
 # Requires: flyctl installed and `fly auth login` done.

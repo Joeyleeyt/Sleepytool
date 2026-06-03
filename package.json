@@ -26,9 +26,7 @@
     "bootstrap": "pnpm install && pnpm infra:up",
     "fly:create": "powershell -ExecutionPolicy Bypass -File scripts/fly/create.ps1",
     "fly:secrets": "powershell -ExecutionPolicy Bypass -File scripts/fly/secrets.ps1",
-    "fly:deploy": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1",
-    "fly:deploy:orchestrator": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1 -Only orchestrator",
-    "fly:deploy:workers": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1 -Only workers"
+    "fly:deploy": "powershell -ExecutionPolicy Bypass -File scripts/fly/deploy.ps1"
   },
   "devDependencies": {
     "turbo": "^2.1.3",

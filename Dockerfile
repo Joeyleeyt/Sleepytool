@@ -1,12 +1,13 @@
-# EmberForge shared image — used by orchestrator, labs-worker, tts-worker, veo3-worker.
-# render-worker uses Dockerfile.render (includes ffmpeg).
-# Web + API now ship together on Vercel; Fly only hosts the long-lived workers.
+# EmberForge lean image (no ffmpeg) — builds any of the non-render workspaces.
 #
-# The APP_TARGET build arg / env var selects which pnpm workspace runs:
+# NOTE: the live Fly deployment (infra/fly/sleepytool.fly.toml) builds BOTH its
+# process groups from Dockerfile.render, so this lean image is currently unused
+# by deploys. It's kept as the slim build path (e.g. if the `workers` group is
+# ever split into its own single-image app). Web + API ship on Vercel.
+#
+# The APP_TARGET build arg / env var selects which pnpm workspace the default
+# CMD runs (sleepytool overrides this per process group via [processes]):
 #   docker build --build-arg APP_TARGET=orchestrator .
-#   fly deploy -c infra/fly/orchestrator.fly.toml
-#
-# Fly.io reads APP_TARGET from each app's [env] block in its fly.toml.
 
 FROM node:20-bookworm-slim
 
@@ -22,6 +23,7 @@ WORKDIR /app
 # Install deps first so layer is cached across source changes
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* turbo.json tsconfig.base.json ./
 COPY apps/orchestrator/package.json apps/orchestrator/
+COPY apps/workers/all/package.json apps/workers/all/
 COPY apps/workers/labs-worker/package.json apps/workers/labs-worker/
 COPY apps/workers/tts-worker/package.json apps/workers/tts-worker/
 COPY apps/workers/veo3-worker/package.json apps/workers/veo3-worker/

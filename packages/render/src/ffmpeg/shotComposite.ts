@@ -22,7 +22,7 @@ export interface ShotCompositeOpts {
 }
 
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
-function isImageInput(p: string): boolean {
+export function isImageInput(p: string): boolean {
   return IMAGE_EXTS.has(path.extname(p).toLowerCase());
 }
 
@@ -32,9 +32,15 @@ function isImageInput(p: string): boolean {
  */
 function imageBaseFilter(mode: KenBurnsMode, width: number, height: number, durationS: number, fps: number): string {
   const totalFrames = Math.max(1, Math.round(durationS * fps));
-  // Render at 2x resolution first so zoompan has headroom, then crop.
-  const renderW = width * 2;
-  const renderH = height * 2;
+  // Render at a modest oversample so zoompan has headroom, then crop. zoompan
+  // is the single hottest CPU filter in the per-shot graph; at 2x (4K for a
+  // 1080p output) it dominates wall clock. 1.3x keeps enough headroom for a
+  // 1.15x max zoom while cutting zoompan's pixel work by ~2.4x. Round to even
+  // dimensions (required by yuv420p / libx264).
+  const oversample = Number(process.env.KENBURNS_OVERSAMPLE ?? '1.3');
+  const even = (n: number) => Math.round(n / 2) * 2;
+  const renderW = even(width * oversample);
+  const renderH = even(height * oversample);
   const zMax = 1.15;
   const zStep = ((zMax - 1) / totalFrames).toFixed(6);
 
@@ -161,10 +167,12 @@ export async function compositeShot(opts: ShotCompositeOpts): Promise<void> {
   filters.push(`[1:a]aresample=48000,loudnorm=I=-18:TP=-2:LRA=11[narration]`);
 
   // Per-shot composite runs N times per project — preset choice dominates
-  // wall clock. Use the same env knobs as finalEncode.ts. Veryfast cuts
-  // per-shot time ~2× with marginal quality loss for intermediate clips.
-  const x264Preset = process.env.FFMPEG_X264_PRESET ?? 'medium';
-  const x264Crf = process.env.FFMPEG_X264_CRF ?? '20';
+  // wall clock. This output is an INTERMEDIATE: it gets re-encoded by the
+  // xfade concat and again by the final encode, so its quality is largely
+  // thrown away. Default to a fast preset / higher CRF for intermediates
+  // (separate knob from the final encode) — veryfast cuts per-shot time ~2×.
+  const x264Preset = process.env.FFMPEG_INTERMEDIATE_PRESET ?? process.env.FFMPEG_X264_PRESET ?? 'veryfast';
+  const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '22';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '20';
   const args = [

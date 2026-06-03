@@ -79,7 +79,12 @@ new Worker(
       throw err;
     }
   },
-  { connection, concurrency: 20 },
+  // Each job buffers a whole video download in memory, so concurrency caps the
+  // peak memory on the shared 2gb `workers` machine — NOT throughput (the veo3
+  // rate limiter at ~30/min is the real throughput gate, and phases run
+  // sequentially so this fan-out is the only veo3 load at a time). 4 keeps peak
+  // download buffers well under the memory budget alongside labs/tts/heap.
+  { connection, concurrency: 4 },
 );
 
 log.info('veo3-worker started');

@@ -1,16 +1,10 @@
-# Deploy one or all EmberForge apps to Fly.io. Web + API now live on Vercel —
-# Fly only hosts the long-lived orchestrator + workers.
+# Deploy the EmberForge worker app (sleepytool) to Fly.io. The orchestrator +
+# 69labs/veo3 workers run as the `workers` process group and ffmpeg as the
+# `render` group — both inside this one app (infra/fly/sleepytool.fly.toml).
+# `fly deploy` ships the whole app (all process groups) at once. Web + API
+# live on Vercel.
 #
-# Usage:
-#   pwsh scripts/fly/deploy.ps1                                  # deploy all
-#   pwsh scripts/fly/deploy.ps1 -App emberforge-orchestrator     # deploy one
-#   pwsh scripts/fly/deploy.ps1 -Only workers                    # orchestrator skipped
-#   pwsh scripts/fly/deploy.ps1 -Only render                     # render-worker only
-
-param(
-  [string]$App = '',
-  [string]$Only = ''   # 'workers' | 'render' | 'orchestrator'
-)
+# Usage:  pwsh scripts/fly/deploy.ps1
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -24,18 +18,6 @@ try {
             $parts = $_ -split '\s+', 2
             [PSCustomObject]@{ Name = $parts[0]; Toml = $parts[1] }
         }
-
-    if ($App)  { $apps = $apps | Where-Object { $_.Name -eq $App } }
-    switch ($Only) {
-        'workers'      { $apps = $apps | Where-Object { $_.Name -like '*-worker' } }
-        'render'       { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-render-worker' } }
-        'orchestrator' { $apps = $apps | Where-Object { $_.Name -eq 'emberforge-orchestrator' } }
-    }
-
-    if (-not $apps) {
-        Write-Host "No apps matched filter" -ForegroundColor Red
-        exit 1
-    }
 
     foreach ($a in $apps) {
         Write-Host ""
@@ -52,4 +34,4 @@ finally {
 }
 
 Write-Host ""
-Write-Host "All deploys complete." -ForegroundColor Green
+Write-Host "Deploy complete." -ForegroundColor Green

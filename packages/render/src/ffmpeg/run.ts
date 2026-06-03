@@ -17,3 +17,20 @@ export async function ffprobeDuration(path: string): Promise<number> {
   ]);
   return Number.parseFloat(res.stdout.trim());
 }
+
+/** True if the file has at least one audio stream. Used by the mixer to decide
+ *  whether a video clip can be stream-copied as-is or needs a silent track. */
+export async function ffprobeHasAudio(path: string): Promise<boolean> {
+  try {
+    const res = await execa(FFPROBE, [
+      '-v', 'error',
+      '-select_streams', 'a',
+      '-show_entries', 'stream=index',
+      '-of', 'csv=p=0',
+      path,
+    ]);
+    return res.stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}

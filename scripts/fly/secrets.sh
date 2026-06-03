@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Push .env secrets to every Fly app (skipping local-only vars).
-# Web + API now live on Vercel — set its env vars in the Vercel dashboard.
+# Push .env secrets to the EmberForge Fly app (skipping local-only vars).
+# Secrets apply to all of the app's process groups. Web + API live on Vercel —
+# set its env vars in the Vercel dashboard.
 #
 # Usage:  ./scripts/fly/secrets.sh
-#         ./scripts/fly/secrets.sh emberforge-orchestrator    # one app
+#         ./scripts/fly/secrets.sh sleepytool    # one app
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

@@ -79,12 +79,18 @@ export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts:
   // eslint-disable-next-line no-console
   console.log(`[xfadeChain] steps=${steps.length} filter_complex length=${filterGraph.length}`);
 
+  // This master is an INTERMEDIATE — the final encode re-encodes it again — so
+  // use the fast intermediate knobs rather than the high-quality final preset.
+  const x264Preset = process.env.FFMPEG_INTERMEDIATE_PRESET ?? process.env.FFMPEG_X264_PRESET ?? 'veryfast';
+  const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '22';
+  const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
+  const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '22';
   const args = [
     ...inputs,
     '-filter_complex', filterGraph,
     '-map', `[${prevV}]`, '-map', `[${prevA}]`,
     '-c:v', opts.nvenc ? 'h264_nvenc' : 'libx264',
-    ...(opts.nvenc ? ['-preset', 'p6', '-cq', '20'] : ['-preset', 'medium', '-crf', '20']),
+    ...(opts.nvenc ? ['-preset', nvencPreset, '-cq', nvencCq] : ['-preset', x264Preset, '-crf', x264Crf]),
     '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart',
@@ -107,7 +113,7 @@ export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts:
       '-filter_complex', [...vFilters, ...aFilters].join(';'),
       '-map', `[${prevV}]`, '-map', `[${prevA}]`,
       '-c:v', 'libx264',
-      '-preset', 'medium', '-crf', '20',
+      '-preset', x264Preset, '-crf', x264Crf,
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '192k',
       '-movflags', '+faststart',

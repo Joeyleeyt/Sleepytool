@@ -16,13 +16,48 @@ import {
 import { downloadToFile, r2Paths, uploadFile } from '@emberforge/storage';
 import { buildAssSubtitles } from '@emberforge/timeline-engine';
 import type { Timeline, TimelineClip } from '@emberforge/core';
-import { compositeShot, buildXfadeChain, finalEncode, mixAudio, type KenBurnsMode } from '@emberforge/render';
-import { ffmpegXfade, transitionOverlapS } from '@emberforge/timeline-engine';
+import { mixClips, finalEncode, mixAudio, type KenBurnsMode, type MixSegment } from '@emberforge/render';
 
 const log = pino({ name: 'render-worker' });
 
 const WORK_DIR = process.env.RENDER_WORK_DIR ?? path.join(os.tmpdir(), 'emberforge');
 const NVENC = (process.env.NVENC_ENABLED ?? 'true') === 'true';
+
+const CPU_COUNT = Math.max(1, os.cpus()?.length ?? 4);
+// Per-shot composites are independent, so we run several FFmpeg processes at
+// once. Each libx264 process is itself multi-threaded, so we don't want one
+// process per core (that oversubscribes); ~half the cores fills the pipeline
+// (overlapping I/O + filter setup + encode) without thrashing. Overridable.
+const SHOT_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.RENDER_SHOT_CONCURRENCY ?? Math.min(8, Math.max(2, Math.ceil(CPU_COUNT / 2)))),
+);
+// How many mix segments to prepare at once (image Ken Burns encodes + video
+// stream-copies). Same oversubscription reasoning as SHOT_CONCURRENCY — each
+// ffmpeg is multi-threaded, so ~half the cores fills the pipeline. Separate
+// knob so the mixer can be tuned independently; defaults to SHOT_CONCURRENCY.
+const MIX_CONCURRENCY = Math.max(
+  1,
+  Number(process.env.RENDER_MIX_CONCURRENCY ?? SHOT_CONCURRENCY),
+);
+// Asset downloads are I/O-bound, so we can fan out wider than the encode pool.
+const DOWNLOAD_CONCURRENCY = Math.max(1, Number(process.env.RENDER_DOWNLOAD_CONCURRENCY ?? 8));
+
+/** Run `fn` over `items` with a bounded worker pool; results keep input order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]!, i);
+    }
+  };
+  const pool = Math.min(Math.max(1, limit), items.length || 1);
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return results;
+}
 
 async function localFor(key: string): Promise<string> {
   const out = path.join(WORK_DIR, key);
@@ -73,80 +108,69 @@ async function runComposite(projectId: string) {
     const assetById = new Map(assets.map((a) => [a.id, a]));
 
     const [w, h] = project.targetRes.split('x').map(Number) as [number, number];
-    const shotOutputs: string[] = [];
 
     log.info(
-      { projectId, shots: tl.clips.length, targetRes: project.targetRes, fps: project.targetFps, nvenc: NVENC },
+      {
+        projectId,
+        shots: tl.clips.length,
+        targetRes: project.targetRes,
+        fps: project.targetFps,
+        nvenc: NVENC,
+        shotConcurrency: SHOT_CONCURRENCY,
+      },
       '[composite] compositing shots',
     );
 
-    let shotIdx = 0;
-    for (const clip of tl.clips) {
-      const shot = shotById.get(clip.shotId)!;
-      const video = assetById.get(clip.videoAssetId)!;
-      const narration = assetById.get(clip.narrationAssetId)!;
-      const shotStart = Date.now();
+    // Resolve each clip's shot/asset rows up front so the workers below only do
+    // I/O + FFmpeg, not map lookups.
+    const work = tl.clips.map((clip) => ({
+      clip,
+      shot: shotById.get(clip.shotId)!,
+      video: assetById.get(clip.videoAssetId)!,
+    }));
 
-      const videoLocal = await localFor(video.r2Key);
-      const narrationLocal = await localFor(narration.r2Key);
-      const outPath = path.join(WORK_DIR, projectId, 'shots', `${shot.ordinal.toString().padStart(4, '0')}_${shot.id}.mp4`);
-      await mkdir(path.dirname(outPath), { recursive: true });
-
-      const fx = (shot.fxRecommendation ?? {}) as {
-        embers?: 'off' | 'subtle' | 'medium' | 'heavy';
-        smoke?: 'off' | 'low' | 'high';
-        filmGrain?: number;
-        vignette?: number;
-      };
-
-      await compositeShot({
-        videoPath: videoLocal,
-        narrationPath: narrationLocal,
-        outPath,
-        durationS: clip.endS - clip.startS,
-        width: w,
-        height: h,
-        fps: project.targetFps,
-        embers: fx.embers ?? 'medium',
-        smoke: fx.smoke ?? 'off',
-        grain: fx.filmGrain ?? 0.08,
-        vignette: fx.vignette ?? 0.4,
-        kenBurns: cameraToKenBurns(shot.cameraMovement ?? 'ken_burns_in'),
-        nvenc: NVENC,
-      });
-
-      shotOutputs.push(outPath);
-      shotIdx += 1;
-      const tookMs = Date.now() - shotStart;
-      log.info(
-        { projectId, shot: `${shotIdx}/${tl.clips.length}`, durationS: clip.endS - clip.startS, tookMs },
-        '[composite] shot done',
-      );
-      // Emit progress every 5 shots so the UI can show a live counter without
-      // spamming the events table on long projects.
-      if (shotIdx % 5 === 0 || shotIdx === tl.clips.length) {
-        await eventsRepo.emit(projectId, 'composite', 'shot_progress', {
-          done: shotIdx,
-          total: tl.clips.length,
-        });
-      }
-    }
-
-    // xfade concat
-    log.info({ projectId }, '[composite] xfade concat');
-    const concatStart = Date.now();
-    const masterPath = path.join(WORK_DIR, projectId, 'composited_master.mp4');
-    await buildXfadeChain(
-      tl.clips.map((c, i) => ({
-        path: shotOutputs[i]!,
-        durationS: c.endS - c.startS,
-        xfade: ffmpegXfade(c.transitionIn),
-        overlapS: transitionOverlapS(c.transitionIn),
-      })),
-      masterPath,
-      { nvenc: NVENC },
+    // Prefetch every video/image asset in parallel BEFORE mixing, deduped by R2
+    // key, so network latency overlaps instead of stalling each segment in-loop.
+    // (Narration is fetched separately by the audio-mix stage.)
+    const dlStart = Date.now();
+    const uniqueKeys = Array.from(new Set(work.map((it) => it.video.r2Key)));
+    const localByKey = new Map<string, string>();
+    await mapLimit(uniqueKeys, DOWNLOAD_CONCURRENCY, async (key) => {
+      localByKey.set(key, await localFor(key));
+    });
+    log.info(
+      { projectId, assets: uniqueKeys.length, tookMs: Date.now() - dlStart },
+      '[composite] assets prefetched',
     );
-    log.info({ projectId, tookMs: Date.now() - concatStart }, '[composite] concat done');
+
+    // Build the ordered segment list. Inputs are already 1K/HD, so the mixer
+    // only fits each clip/image to the target frame — no upscaling. Images get
+    // Ken Burns motion; video clips are stream-copied with their own audio.
+    const segments: MixSegment[] = work.map((it) => ({
+      path: localByKey.get(it.video.r2Key)!,
+      durationS: it.clip.endS - it.clip.startS,
+      kenBurns: cameraToKenBurns(it.shot.cameraMovement ?? 'ken_burns_in'),
+    }));
+
+    // Mix video clips + images into one HD master in a single fast pass.
+    log.info({ projectId, segments: segments.length }, '[composite] mixing clips');
+    const mixStart = Date.now();
+    const masterPath = path.join(WORK_DIR, projectId, 'composited_master.mp4');
+    await mkdir(path.dirname(masterPath), { recursive: true });
+    await mixClips({
+      segments,
+      outPath: masterPath,
+      width: w,
+      height: h,
+      fps: project.targetFps,
+      nvenc: NVENC,
+      concurrency: MIX_CONCURRENCY,
+    });
+    await eventsRepo.emit(projectId, 'composite', 'shot_progress', {
+      done: segments.length,
+      total: segments.length,
+    });
+    log.info({ projectId, tookMs: Date.now() - mixStart }, '[composite] mix done');
 
     await projectsRepo.setStatus(projectId, 'composited');
     await eventsRepo.emit(projectId, 'composite', 'render_succeeded', {

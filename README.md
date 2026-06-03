@@ -177,16 +177,18 @@ Set `IMAGE_RATIO=1` to fall back to the cheaper all-images mode (~$0.20/min, ~$1
 
 ## Deploying to Fly.io
 
-EmberForge ships as six independently-scaled Fly apps from this monorepo:
+Web + API ship on Vercel. Fly hosts the long-lived background workers as a
+single app (`sleepytool`, [infra/fly/sleepytool.fly.toml](infra/fly/sleepytool.fly.toml))
+with two process groups — so two machines, not five:
 
-| App | Image | Purpose |
+| Process group | Job | Machine |
 |---|---|---|
-| `emberforge-api` | `Dockerfile` | Fastify HTTP gateway (port 8080, public) |
-| `emberforge-orchestrator` | `Dockerfile` | BullMQ flow coordinator + stage handlers |
-| `emberforge-labs-worker` | `Dockerfile` | 69labs image/video jobs |
-| `emberforge-tts-worker` | `Dockerfile` | 69labs TTS jobs |
-| `emberforge-veo3-worker` | `Dockerfile` | Veo 3 jobs (idle when DISABLE_VEO3=true) |
-| `emberforge-render-worker` | `Dockerfile.render` | FFmpeg composite + encode (mounted scratch disk) |
+| `workers` | orchestrator + 69labs (image/video/TTS) + Veo 3 — all I/O-bound BullMQ consumers in one Node process ([apps/workers/all](apps/workers/all)) | `shared-cpu-2x` / 2gb |
+| `render` | FFmpeg composite + encode | `performance-4x` / 8gb + mounted scratch disk |
+
+The four jobs in `workers` spend ~all their time awaiting external HTTP APIs,
+so co-hosting them costs about the same as one alone while removing three idle
+machines. Only `render` (CPU-bound, needs ffmpeg + a volume) stays separate.
 
 ### Managed services you'll need
 
@@ -219,62 +221,58 @@ $env:DATABASE_URL="postgres://...supabase.co..."; pnpm db:migrate
 iwr https://fly.io/install.ps1 -useb | iex
 fly auth login
 
-# 2. create the six Fly apps (idempotent)
+# 2. create the Fly app (idempotent)
 pnpm fly:create
 
-# 3. push every secret from .env to every app
+# 3. push every secret from .env to the app
 pnpm fly:secrets
 
-# 4. build + deploy all six apps in sequence
+# 4. build + deploy the app (both process groups)
 pnpm fly:deploy
 ```
 
-The API is now public at `https://emberforge-api.fly.dev`. Submit a transcript:
+Submit a transcript (API runs on Vercel):
 
 ```powershell
-$env:EMBERFORGE_API="https://emberforge-api.fly.dev"
+$env:EMBERFORGE_API="https://<your-vercel-deployment>"
 pnpm tsx scripts/submit-transcript.ts ./samples/sample-transcript.txt
 ```
 
-### Incremental deploys
+### Redeploys
 
 ```bash
-pnpm fly:deploy:api            # API only
-pnpm fly:deploy:orchestrator   # orchestrator only
-pnpm fly:deploy:workers        # all four workers
-# one specific app:
-pwsh scripts/fly/deploy.ps1 -App emberforge-labs-worker
+# edit code or .env, then:
+pnpm fly:secrets        # stages secrets on the app (no-op if unchanged)
+pnpm fly:deploy         # rebuilds + rolling-restarts both process groups
 ```
 
-### Updating secrets later
+### Scaling
+
+`fly deploy` ships both process groups at once. To scale them independently,
+target the process group with `--process-group`:
 
 ```bash
-# edit .env, then:
-pnpm fly:secrets        # stages on all apps
-pnpm fly:deploy         # rolling restart picks up new secrets
-```
-
-### Scaling per worker
-
-```bash
-# more parallel 69labs throughput
-fly scale count 3 --app emberforge-labs-worker
+# more parallel worker throughput (extra machines for the I/O-bound group)
+fly scale count 2 --process-group workers --app sleepytool
 
 # bigger render machine
-fly scale vm performance-4x --app emberforge-render-worker
+fly scale vm performance-8x --process-group render --app sleepytool
 
 # GPU render (L40S) + NVENC
-fly scale vm l40s --app emberforge-render-worker
-fly secrets set NVENC_ENABLED=true --app emberforge-render-worker
+fly scale vm l40s --process-group render --app sleepytool
+fly secrets set NVENC_ENABLED=true --app sleepytool
 ```
+
+If the `workers` group ever needs to scale per-queue (e.g. Veo 3 spikes while
+69labs is idle), split that queue back into its own process group in
+`sleepytool.fly.toml` — the worker source is unchanged, so it's a few lines.
 
 ### Cost notes
 
-- Worker apps `auto_stop_machines = "stop"` → $0 cost when their queue is empty
-- `emberforge-api` keeps min 1 machine running for HTTP latency
-- `emberforge-orchestrator` keeps min 1 machine running to pick up jobs immediately
-- `emberforge-render-worker` performance-2x: ~$0.014/hr while actively encoding
-- L40S GPU render: ~$2/hr when running; scale to zero when idle
+- Two always-on machines instead of five — the `workers` group folds four
+  former machines into one `shared-cpu-2x`
+- `render` `performance-4x`: only the heavy encode machine; idle between renders
+- L40S GPU render: ~$2/hr when running
 
 ## Promoting to production (other items)
 

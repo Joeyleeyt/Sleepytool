@@ -16,6 +16,46 @@ export interface FinalEncodeOpts {
 export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
   const [w, h] = opts.res.split('x');
 
+  // FAST PATH — no subtitle burn-in (the default; subs ship as a sidecar).
+  //
+  // `mixClips` already produced `videoPath` as a finished H.264 yuv420p stream
+  // at the target resolution: image segments were encoded to w×h, source video
+  // clips were stream-copied, and the whole thing was joined with the lossless
+  // concat demuxer (which only succeeds when every segment shares the target
+  // dimensions/codec). Re-encoding that master AGAIN through libx264 just to
+  // attach the narration track is a full second encode — hours of CPU on a
+  // 2-hour 1080p timeline for a pixel-identical result.
+  //
+  // Instead, stream-COPY the already-encoded video and only (cheaply) transcode
+  // the narration WAV to AAC. A 2-hour remux is seconds, not hours. If the copy
+  // mux fails for any reason (unexpected codec/param in the master), fall
+  // through to the full re-encode below so a render never hard-fails.
+  if (!opts.subtitlesPath) {
+    try {
+      await ffmpeg([
+        '-y',
+        '-i', opts.videoPath,
+        '-i', opts.audioPath,
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '256k',
+        // No -shortest: the composited master defines the timeline length, same
+        // as the full-re-encode path below (mixed.wav is built to totalDurS, so
+        // they already match — this just guards against trimming the video if
+        // the narration mix lands a few ms short).
+        '-movflags', '+faststart',
+        opts.outPath,
+      ]);
+      return;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[finalEncode] stream-copy mux failed, falling back to full re-encode:',
+        (err as Error).message?.slice(0, 200),
+      );
+    }
+  }
+
   // ffmpeg's `subtitles=` filter is notoriously fragile with Windows paths
   // containing parens, spaces, or colons. Copy the .ass into a "safe" temp
   // location with only [a-z0-9_] in the path before invoking ffmpeg.

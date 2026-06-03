@@ -134,6 +134,28 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
+  apps/workers/all:
+    dependencies:
+      '@emberforge/labs-worker':
+        specifier: workspace:*
+        version: link:../labs-worker
+      '@emberforge/orchestrator':
+        specifier: workspace:*
+        version: link:../../orchestrator
+      '@emberforge/tts-worker':
+        specifier: workspace:*
+        version: link:../tts-worker
+      '@emberforge/veo3-worker':
+        specifier: workspace:*
+        version: link:../veo3-worker
+    devDependencies:
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.3
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   apps/workers/labs-worker:
     dependencies:
       '@emberforge/ai-clients':

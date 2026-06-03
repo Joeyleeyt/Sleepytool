@@ -16,6 +16,7 @@ WORKDIR /app
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* turbo.json tsconfig.base.json ./
 COPY apps/orchestrator/package.json apps/orchestrator/
+COPY apps/workers/all/package.json apps/workers/all/
 COPY apps/workers/labs-worker/package.json apps/workers/labs-worker/
 COPY apps/workers/tts-worker/package.json apps/workers/tts-worker/
 COPY apps/workers/veo3-worker/package.json apps/workers/veo3-worker/

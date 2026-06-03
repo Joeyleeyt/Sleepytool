@@ -99,10 +99,16 @@ export async function startGenerateAssetsFlow(projectId: string) {
  * Phase 4 — user-triggered after reviewing generated assets.
  *
  *   publish
- *     └── encode
- *           └── composite
- *                 └── mixAudio
- *                       └── buildTimeline
+ *     └── encode            (render-worker: composite + audio mix + final encode)
+ *           └── mixAudio    (placeholder status node)
+ *                 └── buildTimeline
+ *
+ * NOTE: there is deliberately NO separate `composite` child. The `encode` stage
+ * already runs the composite internally (runComposite → runAudioMix →
+ * finalEncode), and runComposite is not on-disk-idempotent, so a separate
+ * composite child would just do the full ~9GB download + image-encode + concat
+ * a SECOND time before encode redoes it. The composite stage is still
+ * independently runnable via the replay endpoint when debugging.
  */
 export async function startRenderFlow(projectId: string) {
   return flowProducer.add({
@@ -116,21 +122,14 @@ export async function startRenderFlow(projectId: string) {
         data: { projectId, stage: 'encode' },
         children: [
           {
-            name: 'composite',
-            queueName: 'render',
-            data: { projectId, stage: 'composite' },
+            name: 'mixAudio',
+            queueName: 'audio',
+            data: { projectId },
             children: [
               {
-                name: 'mixAudio',
-                queueName: 'audio',
+                name: 'buildTimeline',
+                queueName: 'timeline',
                 data: { projectId },
-                children: [
-                  {
-                    name: 'buildTimeline',
-                    queueName: 'timeline',
-                    data: { projectId },
-                  },
-                ],
               },
             ],
           },

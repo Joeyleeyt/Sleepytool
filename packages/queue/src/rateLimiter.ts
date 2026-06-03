@@ -20,6 +20,13 @@ const LIMITS: Record<string, BucketConfig> = {
 };
 
 // Atomic token-bucket in Lua so concurrent workers cannot oversubscribe.
+//
+// Return value is the number of MILLISECONDS the caller should wait before the
+// requested weight will have refilled: 0 means "acquired, go now". Returning
+// the wait time (instead of a 0/1 yes/no) is what lets the client sleep for the
+// real deficit instead of busy-polling every ~250ms — see `acquire()`. A token
+// bucket refills at a known rate, so the wait is exactly computable here; there
+// is no reason to keep asking Redis "is it ready yet?" on a fixed tick.
 const LUA = `
 local key = KEYS[1]
 local capacity = tonumber(ARGV[1])
@@ -38,15 +45,28 @@ if tokens >= weight then
   tokens = tokens - weight
   redis.call('HMSET', key, 'tokens', tokens, 'ts', now_ms)
   redis.call('PEXPIRE', key, 60000)
-  return 1
-else
-  redis.call('HMSET', key, 'tokens', tokens, 'ts', now_ms)
-  redis.call('PEXPIRE', key, 60000)
   return 0
 end
+
+-- Not enough tokens. Persist the accrual (so 'ts' advances and we don't
+-- re-credit the same elapsed window next call), then tell the caller how long
+-- to wait for the deficit to refill, in ms. Guard refill<=0 to avoid div-by-0.
+redis.call('HMSET', key, 'tokens', tokens, 'ts', now_ms)
+redis.call('PEXPIRE', key, 60000)
+if refill <= 0 then
+  return 60000
+end
+local deficit = weight - tokens
+return math.ceil(deficit / refill * 1000)
 `;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Cap a single sleep so a long wait still re-checks periodically: another
+// worker may have consumed the tokens this caller was waiting for (the returned
+// wait assumes the deficit is all ours), or clock skew may shift things. At 5s
+// a 12s wait costs ~3 EVALs instead of the ~32 the old 250ms poll burned.
+const MAX_SLEEP_MS = 5_000;
 
 export async function acquire(provider: keyof typeof LIMITS | string, weight = 1): Promise<void> {
   const cfg = LIMITS[provider];
@@ -54,7 +74,7 @@ export async function acquire(provider: keyof typeof LIMITS | string, weight = 1
   const key = `tb:${provider}`;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const ok = (await connection.eval(
+    const waitMs = (await connection.eval(
       LUA,
       1,
       key,
@@ -63,7 +83,10 @@ export async function acquire(provider: keyof typeof LIMITS | string, weight = 1
       String(weight),
       String(Date.now()),
     )) as number;
-    if (ok === 1) return;
-    await sleep(250 + Math.floor(Math.random() * 250));
+    if (waitMs <= 0) return;
+    // Small jitter so concurrent waiters don't all wake on the same tick and
+    // stampede the bucket (and Redis) in lockstep.
+    const jitter = Math.floor(Math.random() * 100);
+    await sleep(Math.min(waitMs, MAX_SLEEP_MS) + jitter);
   }
 }

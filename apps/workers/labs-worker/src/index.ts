@@ -53,11 +53,12 @@ new Worker(
           ? await labs69.image({
               prompt: prompt.promptText,
               negative: prompt.negative ?? undefined,
-              // 16:9 fills a 1920×1080 frame edge-to-edge. 2k source (~2048×1152)
-              // gives Ken Burns zoompan ~15% headroom while staying sharp at
-              // the final 1080p target.
+              // Full HD target: 2k (~2048×1152) is the smallest 69labs tier that
+              // fully covers a 1920×1080 frame, so it downscales to crisp Full HD
+              // (1k is sub-1080p and would be upscaled). nano-banana models
+              // accept 1k|2k|4k; override via LABS69_IMAGE_RESOLUTION.
               aspectRatio: '16:9',
-              resolution: '2k',
+              resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
             })
           : await labs69.video({
               prompt: prompt.promptText,
@@ -101,8 +102,12 @@ new Worker(
       throw err;
     }
   },
-  // Concurrency matches 69labs published limits: ~10/min image, ~5/min video
-  { connection, concurrency: 4 },
+  // 69labs limits (~10/min image, ~5/min video) gate throughput; the rate
+  // limiter is the real backstop. Each job buffers a video/image download in
+  // memory, so concurrency sets peak memory on the `workers` machine — size the
+  // VM RAM accordingly (8 ⇒ 6gb). Default 8; LABS_CONCURRENCY overrides.
+  // See infra/fly/sleepytool.fly.toml.
+  { connection, concurrency: Math.max(1, Number(process.env.LABS_CONCURRENCY ?? 8)) },
 );
 
 log.info('labs-worker started');

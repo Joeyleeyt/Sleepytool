@@ -1,0 +1,19 @@
+{
+  "name": "@emberforge/workers",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "node --env-file=../../../.env --import tsx --watch src/index.ts",
+    "start": "node --import tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@emberforge/orchestrator": "workspace:*",
+    "@emberforge/labs-worker": "workspace:*",
+    "@emberforge/tts-worker": "workspace:*",
+    "@emberforge/veo3-worker": "workspace:*"
+  },
+  "devDependencies": { "typescript": "^5.6.3", "tsx": "^4.19.2" }
+}
