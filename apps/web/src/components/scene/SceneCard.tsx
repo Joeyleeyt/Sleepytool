@@ -6,7 +6,6 @@ import {
   Image as ImageIcon,
   Sparkles,
   MoreHorizontal,
-  AlertTriangle,
   CheckCircle2,
   Volume2,
   Play,
@@ -44,7 +43,6 @@ export function SceneCard({
   const SourceIcon = SOURCE_ICON[shot.visualType] ?? Film;
   const isReady = shot.status === 'ready';
   const isFailed = shot.status === 'failed';
-  const isGenerating = !isFailed && (shot.status === 'pending' || shot.status === 'partial');
 
   // Which legs to retry — both by default, narrowed to whatever failed.
   const failedLegs = [
@@ -151,17 +149,12 @@ export function SceneCard({
       onKeyDown={handleKeyDown}
       onDoubleClick={() => onOpenStudio?.(shot.id)}
       className={cn(
-        'group text-left rounded-card overflow-hidden border bg-bg-elev hover:border-border-strong transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-ember-500/50',
+        'group h-full flex flex-col text-left rounded-card overflow-hidden border bg-bg-elev hover:border-border-strong transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-ember-500/50',
         selected ? 'border-ember-500 shadow-ember' : 'border-border',
       )}
     >
-      <div className="relative aspect-video bg-bg-subtle grid place-items-center text-text-faint overflow-hidden">
-        {isGenerating ? (
-          <>
-            <div className="absolute inset-0 shimmer" />
-            <SourceIcon size={28} className="relative" />
-          </>
-        ) : isReady ? (
+      <div className="relative shrink-0 aspect-video bg-bg-subtle grid place-items-center text-text-faint overflow-hidden">
+        {isReady ? (
           <>
             {hasImage ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -221,12 +214,39 @@ export function SceneCard({
             )}
           </>
         ) : (
+          // Both generating and failed shots use the neutral generating
+          // shimmer — a failure should not look like an error/warning card.
           <>
-            <AlertTriangle size={28} className="text-bad" />
+            <div className="absolute inset-0 shimmer" />
+            <SourceIcon size={28} className="relative" />
+
+            {/* Failed shots stay visually identical to generating ones; a
+                subtle, neutral retry control surfaces only on hover so the
+                shot can still be re-run. */}
+            {isFailed && (
+              <button
+                type="button"
+                aria-label="Retry"
+                title={retry.error ? (retry.error as Error).message : 'Retry generation'}
+                disabled={retry.isPending}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  retry.mutate();
+                }}
+                className={cn(
+                  'absolute inset-0 grid place-items-center transition-opacity z-10 disabled:cursor-wait',
+                  retry.isPending || hovered ? 'opacity-100' : 'opacity-0',
+                )}
+              >
+                <span className="grid place-items-center w-11 h-11 rounded-full bg-black/55 backdrop-blur-sm text-white shadow-lg transition-transform group-hover:scale-105">
+                  <RefreshCw size={18} className={retry.isPending ? 'animate-spin' : ''} />
+                </span>
+              </button>
+            )}
           </>
         )}
       </div>
-      <div className="p-2.5">
+      <div className="p-2.5 flex-1 flex flex-col">
         <div className="flex items-center justify-between gap-2 text-[11px] text-text-faint">
           <div className="flex items-center gap-1.5 font-mono">
             <span>S{sceneOrdinal + 1}·{shot.ordinal + 1}</span>
@@ -235,90 +255,41 @@ export function SceneCard({
           </div>
           <SourceIcon size={13} className="text-text-dim" />
         </div>
-        <p className="mt-1.5 text-[13px] font-narration leading-snug text-text line-clamp-3">
+        <p className="mt-1.5 text-[13px] font-narration leading-snug text-text line-clamp-2">
           {shot.narrationText}
         </p>
-        {/* Visual prompt preview — only while the shot hasn't generated yet.
-            Lets the user scan all prompts on /board without opening Studio for
-            each one. Click the card → Studio for full editing. */}
-        {!isReady && shot.visualPrompt && (
-          <div className="mt-2 rounded border border-border bg-bg-subtle/60 p-2">
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <Badge tone="neutral" className="font-mono lowercase">
-                {shot.visualPrompt.target}
-              </Badge>
-              <span className="text-[10px] text-text-faint">prompt</span>
+        {/* Tag + prompt group — pinned to the bottom (mt-auto) so the tag sits
+            next to the prompt rather than under the media, with a guaranteed
+            top margin (pt-3) above the tag. */}
+        <div className="mt-auto pt-3">
+          {/* Tag row — fixed height so cards stay the same height whether or
+              not the shot has a tag like "embers". */}
+          <div className="flex items-center justify-between gap-2 min-h-5">
+            <div className="flex items-center gap-1">
+              {(shot.fxRecommendation as { embers?: string })?.embers && (shot.fxRecommendation as { embers?: string }).embers !== 'off' && (
+                <Badge tone="ember" className="lowercase">embers</Badge>
+              )}
             </div>
-            <p className="text-[11px] text-text-dim leading-snug line-clamp-3 font-mono">
-              {shot.visualPrompt.promptText}
-            </p>
+            <MoreHorizontal size={14} className="text-text-faint opacity-0 group-hover:opacity-100" />
           </div>
-        )}
-        {/* Failure reasons + per-shot retry. Shown only when status === 'failed',
-            i.e. at least one leg has a recorded failure and no successful asset
-            has covered it. The retry button re-enqueues just the failing legs. */}
-        {isFailed && (
-          <div className="mt-2 rounded border border-bad/40 bg-bad/5 p-2 space-y-1.5">
-            {shot.failures.visual && (
-              <FailureLine leg="visual" failure={shot.failures.visual} />
-            )}
-            {shot.failures.narration && (
-              <FailureLine leg="narration" failure={shot.failures.narration} />
-            )}
-            <button
-              type="button"
-              disabled={retry.isPending}
-              onClick={(e) => {
-                e.stopPropagation();
-                retry.mutate();
-              }}
-              className="mt-1 w-full h-7 inline-flex items-center justify-center gap-1.5 rounded bg-bad text-white text-[11px] font-medium hover:bg-bad/90 disabled:opacity-60 disabled:cursor-wait"
-            >
-              <RefreshCw size={11} className={retry.isPending ? 'animate-spin' : ''} />
-              {retry.isPending
-                ? 'Retrying…'
-                : failedLegs.length === 2
-                  ? 'Retry both'
-                  : `Retry ${failedLegs[0]}`}
-            </button>
-            {retry.error && (
-              <div className="text-[10px] text-bad">{(retry.error as Error).message}</div>
-            )}
-          </div>
-        )}
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1">
-            {(shot.fxRecommendation as { embers?: string })?.embers && (shot.fxRecommendation as { embers?: string }).embers !== 'off' && (
-              <Badge tone="ember" className="lowercase">embers</Badge>
-            )}
-            {isFailed && (
-              <Badge tone="bad">
-                <AlertTriangle size={9} className="mr-0.5" />
-                failed
-              </Badge>
-            )}
-          </div>
-          <MoreHorizontal size={14} className="text-text-faint opacity-0 group-hover:opacity-100" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function FailureLine({
-  leg,
-  failure,
-}: {
-  leg: 'visual' | 'narration';
-  failure: { provider: string; message: string; finishedAt: string | null };
-}) {
-  return (
-    <div className="flex items-start gap-1.5">
-      <Badge tone="bad" className="font-mono lowercase shrink-0">{leg}</Badge>
-      <div className="min-w-0 flex-1">
-        <div className="text-[10px] text-text-faint font-mono">{failure.provider}</div>
-        <div className="text-[11px] text-bad leading-snug line-clamp-2" title={failure.message}>
-          {failure.message}
+          {/* Visual prompt preview — shown in every state (generating, failed,
+              and ready) so the user can scan all prompts on /board without
+              opening Studio. */}
+          {shot.visualPrompt && (
+            <div className="pt-2">
+              <div className="rounded border border-border bg-bg-subtle/60 p-2">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <Badge tone="neutral" className="font-mono lowercase">
+                    {shot.visualPrompt.target}
+                  </Badge>
+                  <span className="text-[10px] text-text-faint">prompt</span>
+                </div>
+                <p className="text-[11px] text-text-dim leading-snug line-clamp-2 font-mono">
+                  {shot.visualPrompt.promptText}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

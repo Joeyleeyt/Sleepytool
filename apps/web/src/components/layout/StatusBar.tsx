@@ -52,7 +52,6 @@ export function StatusBar() {
       </div>
       <div className="text-text-dim tabular-nums">
         Assets {data.shots.ready}/{data.shots.total}
-        {data.shots.failed > 0 && <span className="text-bad ml-2">⚠ {data.shots.failed} failed</span>}
       </div>
     </div>
   );

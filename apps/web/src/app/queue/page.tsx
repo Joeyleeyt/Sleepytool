@@ -59,7 +59,6 @@ function QueueRow({ projectId, title, status }: { projectId: string; title: stri
       </div>
       <div className="mt-2 text-xs text-text-dim tabular-nums">
         Assets: {data?.shots?.ready ?? 0} / {data?.shots?.total ?? 0}
-        {data?.shots && data.shots.failed > 0 && <span className="text-bad ml-3">⚠ {data.shots.failed} failed</span>}
       </div>
     </Link>
   );
