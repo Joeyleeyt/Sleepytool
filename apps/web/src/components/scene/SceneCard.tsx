@@ -214,11 +214,14 @@ export function SceneCard({
             )}
           </>
         ) : (
-          // Both generating and failed shots use the neutral generating
-          // shimmer — a failure should not look like an error/warning card.
+          // Both generating and failed shots use the active "generating"
+          // animation — an ember beam + breathing glow + pulsing icon — so it
+          // reads as work-in-progress, not a neutral loading skeleton. A
+          // failure should not look like an error/warning card.
           <>
-            <div className="absolute inset-0 shimmer" />
-            <SourceIcon size={28} className="relative" />
+            <div className="absolute inset-0 generating-glow" />
+            <div className="absolute inset-0 generating-sweep" />
+            <SourceIcon size={28} className="relative text-ember-400 generating-icon" />
 
             {/* Failed shots stay visually identical to generating ones; a
                 subtle, neutral retry control surfaces only on hover so the

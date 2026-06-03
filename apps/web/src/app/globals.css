@@ -26,4 +26,47 @@
     background-size: 200% 100%;
     @apply animate-shimmer;
   }
+
+  /* Active "generating" state for asset cards — an ember beam scanning across
+     the tile, a breathing glow, and a pulsing icon. Keyframes are declared
+     directly below (not via @apply on config utilities) so the styles are
+     self-contained and don't depend on tailwind.config.ts reloads. */
+  .generating-sweep {
+    background-image: linear-gradient(
+      110deg,
+      rgba(249, 115, 22, 0) 35%,
+      rgba(249, 115, 22, 0.22) 50%,
+      rgba(249, 115, 22, 0) 65%
+    );
+    background-size: 200% 100%;
+    animation: gen-sweep 1.8s linear infinite;
+  }
+
+  .generating-glow {
+    background-image: radial-gradient(
+      circle at 50% 55%,
+      rgba(249, 115, 22, 0.28),
+      transparent 70%
+    );
+    animation: gen-glow 2.6s ease-in-out infinite;
+  }
+
+  .generating-icon {
+    animation: gen-pulse 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes gen-sweep {
+  0% { background-position: 150% 0; }
+  100% { background-position: -150% 0; }
+}
+
+@keyframes gen-glow {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.55; }
+}
+
+@keyframes gen-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.08); }
 }
