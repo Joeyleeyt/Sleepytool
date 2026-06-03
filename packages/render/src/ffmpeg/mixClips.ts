@@ -50,21 +50,40 @@ function evenFloor(n: number): number {
   return Math.floor(n / 2) * 2;
 }
 
-/** zoompan z/x/y expressions for a Ken Burns move over `totalFrames`. */
+/**
+ * zoompan z/x/y expressions for a Ken Burns move over `totalFrames`.
+ *
+ * The zoom is driven LINEARLY from the output-frame counter `on`, not the
+ * recursive `zoom+step` accumulator. The recursive form re-reads the previous
+ * frame's already integer-quantized zoom, so its per-frame step is never
+ * exactly uniform (a subtle source of unevenness); an `on`-based ramp advances
+ * by an identical delta every frame.
+ *
+ * Centered moves keep x/y at the crop center. zoompan still floors x/y to whole
+ * INPUT pixels, so smoothness depends on the oversampled canvas built in
+ * `imageVideoFilter` — there a 1px input step is sub-pixel in the final frame.
+ */
 function kenBurnsExpr(mode: KenBurnsMode, totalFrames: number): { zoom: string; x: string; y: string } {
   const zMax = 1.15;
-  const zStep = ((zMax - 1) / Math.max(1, totalFrames)).toFixed(6);
+  const frames = Math.max(1, totalFrames);
+  // Linear 0 → (zMax-1) ramp over the clip. `on` is the output frame index.
+  const up = `(${(zMax - 1).toFixed(6)}*on/${frames})`;
+  const cx = '(iw-iw/zoom)/2';
+  const cy = '(ih-ih/zoom)/2';
   switch (mode) {
     case 'out':
-      return { zoom: `if(eq(on,0),${zMax},max(zoom-${zStep},1))`, x: '(iw-iw/zoom)/2', y: '(ih-ih/zoom)/2' };
+      return { zoom: `(${zMax}-${up})`, x: cx, y: cy };
     case 'left':
-      return { zoom: `min(zoom+${zStep},${zMax})`, x: `iw*(1 - on/${totalFrames})`, y: '(ih-ih/zoom)/2' };
+      // Pan only within the zoomed headroom (max offset = iw-iw/zoom). The old
+      // `iw*(...)` ran the crop far past the right edge, where zoompan clamps it
+      // and the pan visibly "sticks".
+      return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(1-on/${frames})`, y: cy };
     case 'right':
-      return { zoom: `min(zoom+${zStep},${zMax})`, x: `iw*(on/${totalFrames})`, y: '(ih-ih/zoom)/2' };
+      return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(on/${frames})`, y: cy };
     case 'in':
     case 'none':
     default:
-      return { zoom: `min(zoom+${zStep},${zMax})`, x: '(iw-iw/zoom)/2', y: '(ih-ih/zoom)/2' };
+      return { zoom: `(1+${up})`, x: cx, y: cy };
   }
 }
 
@@ -76,16 +95,22 @@ function kenBurnsExpr(mode: KenBurnsMode, totalFrames: number): { zoom: string; 
  */
 function imageVideoFilter(mode: KenBurnsMode, w: number, h: number, durationS: number, fps: number): string {
   const totalFrames = Math.max(1, Math.round(durationS * fps));
-  // Light oversample purely for smooth zoom (not to recover detail) — kept far
-  // below the old 2× so zoompan stays cheap. Override with KENBURNS_OVERSAMPLE.
-  const oversample = Math.max(1, Number(process.env.KENBURNS_OVERSAMPLE ?? '1.2'));
+  // zoompan rounds its x/y crop offsets to whole INPUT pixels every frame. When
+  // the input canvas is only ~target-size, that 1px rounding is ~1px of visible
+  // jitter as the zoom ramps ⇒ the image "shakes" while zooming. Fix: feed
+  // zoompan a heavily oversampled canvas so 1px of input rounding is sub-pixel in
+  // the final frame, but keep zoompan's OUTPUT (s=) at the TARGET resolution —
+  // zoompan's cost is driven by its output size, so a large input oversample
+  // stays cheap and we drop the extra downscale pass entirely. Must stay above
+  // the 1.15x max zoom; 3x renders smooth. Override with KENBURNS_OVERSAMPLE.
+  const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
   const rw = evenFloor(w * oversample);
   const rh = evenFloor(h * oversample);
   const { zoom, x, y } = kenBurnsExpr(mode, totalFrames);
   return (
     `[0:v]scale=${rw}:${rh}:force_original_aspect_ratio=increase,crop=${rw}:${rh},` +
-    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${rw}x${rh}:fps=${fps},` +
-    `scale=${w}:${h},setsar=1,format=yuv420p[v]`
+    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${w}x${h}:fps=${fps},` +
+    `setsar=1,format=yuv420p[v]`
   );
 }
 
@@ -192,14 +217,16 @@ async function mixViaConcatFilter(opts: MixClipsOpts): Promise<void> {
       if (!dur || dur <= 0) throw new Error(`image segment needs a durationS: ${seg.path}`);
       inputs.push('-loop', '1', '-framerate', String(fps), '-t', String(dur), '-i', seg.path);
       const totalFrames = Math.max(1, Math.round(dur * fps));
-      const oversample = Math.max(1, Number(process.env.KENBURNS_OVERSAMPLE ?? '1.2'));
+      // Same anti-shake recipe as imageVideoFilter(): oversample the input canvas
+      // so zoompan's integer x/y rounding is sub-pixel, output at target res.
+      const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
       const rw = evenFloor(w * oversample);
       const rh = evenFloor(h * oversample);
       const { zoom, x, y } = kenBurnsExpr(seg.kenBurns ?? 'in', totalFrames);
       vparts.push(
         `[${idx}:v]scale=${rw}:${rh}:force_original_aspect_ratio=increase,crop=${rw}:${rh},` +
-          `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${rw}x${rh}:fps=${fps},` +
-          `scale=${w}:${h},setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v${idx}]`,
+          `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${w}x${h}:fps=${fps},` +
+          `setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v${idx}]`,
       );
       aparts.push(
         `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SR},atrim=0:${dur},asetpts=PTS-STARTPTS[a${idx}]`,

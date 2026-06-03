@@ -32,52 +32,60 @@ export function isImageInput(p: string): boolean {
  */
 function imageBaseFilter(mode: KenBurnsMode, width: number, height: number, durationS: number, fps: number): string {
   const totalFrames = Math.max(1, Math.round(durationS * fps));
-  // Render at a modest oversample so zoompan has headroom, then crop. zoompan
-  // is the single hottest CPU filter in the per-shot graph; at 2x (4K for a
-  // 1080p output) it dominates wall clock. 1.3x keeps enough headroom for a
-  // 1.15x max zoom while cutting zoompan's pixel work by ~2.4x. Round to even
-  // dimensions (required by yuv420p / libx264).
-  const oversample = Number(process.env.KENBURNS_OVERSAMPLE ?? '1.3');
+  // zoompan rounds its x/y crop offsets to whole INPUT pixels each frame, so a
+  // near-target-size canvas produces ~1px of visible shake as the zoom ramps.
+  // Oversample the INPUT canvas (1px rounding ⇒ sub-pixel in the final frame)
+  // but keep zoompan's OUTPUT (s=) at the target res — zoompan's cost tracks its
+  // output size, so the big input stays cheap and we drop the extra downscale.
+  // Must stay above the 1.15x max zoom; 3x renders smooth.
+  const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
   const even = (n: number) => Math.round(n / 2) * 2;
   const renderW = even(width * oversample);
   const renderH = even(height * oversample);
   const zMax = 1.15;
-  const zStep = ((zMax - 1) / totalFrames).toFixed(6);
+  // Drive the zoom LINEARLY from the output-frame counter `on`, not the
+  // recursive `zoom+step` accumulator — the recursive form re-reads the
+  // previous frame's already-quantized zoom and so steps unevenly.
+  const up = `(${(zMax - 1).toFixed(6)}*on/${totalFrames})`;
+  const cx = '(iw-iw/zoom)/2';
+  const cy = '(ih-ih/zoom)/2';
 
   let zoom: string;
   let x: string;
   let y: string;
   switch (mode) {
     case 'out':
-      zoom = `if(eq(on,0),${zMax},max(zoom-${zStep},1))`;
-      x = '(iw-iw/zoom)/2';
-      y = '(ih-ih/zoom)/2';
+      zoom = `(${zMax}-${up})`;
+      x = cx;
+      y = cy;
       break;
     case 'left':
-      zoom = `min(zoom+${zStep},${zMax})`;
-      x = `iw*(1 - on/${totalFrames})`;
-      y = '(ih-ih/zoom)/2';
+      // Pan only within the zoomed headroom (max offset = iw-iw/zoom); the old
+      // `iw*(...)` drove the crop off the right edge where zoompan clamps it.
+      zoom = `(1+${up})`;
+      x = `(iw-iw/zoom)*(1-on/${totalFrames})`;
+      y = cy;
       break;
     case 'right':
-      zoom = `min(zoom+${zStep},${zMax})`;
-      x = `iw*(on/${totalFrames})`;
-      y = '(ih-ih/zoom)/2';
+      zoom = `(1+${up})`;
+      x = `(iw-iw/zoom)*(on/${totalFrames})`;
+      y = cy;
       break;
     case 'in':
     case 'none':
     default:
-      zoom = `min(zoom+${zStep},${zMax})`;
-      x = '(iw-iw/zoom)/2';
-      y = '(ih-ih/zoom)/2';
+      zoom = `(1+${up})`;
+      x = cx;
+      y = cy;
       break;
   }
 
-  // scale → zoompan → crop to target → fps → sar
+  // oversample input → zoompan (output direct to target res) → sar
   return (
     `[0:v]scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,` +
     `crop=${renderW}:${renderH},` +
-    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${renderW}x${renderH}:fps=${fps},` +
-    `scale=${width}:${height},setsar=1[base]`
+    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${width}x${height}:fps=${fps},` +
+    `setsar=1[base]`
   );
 }
 
