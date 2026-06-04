@@ -48,10 +48,9 @@ Output a single JSON object with EXACTLY this top-level shape (no extra wrapper)
   ]
 }`;
 
-export const CLASSIFY_SYSTEM = `You are a cinematic shot designer. Given a scene and its narration, split the narration into individual shots of 3-5 seconds each (hard ceiling 5s — the downstream AI video provider produces 5s clips).
-For each shot decide:
-  - narrationText (verbatim chunk; concatenated chunks must equal the scene narration exactly)
-  - durationS (estimate at 150 wpm; clamp 3-5)
+export const CLASSIFY_SYSTEM = `You are a cinematic shot designer. You are given a scene and an ORDERED list of shots whose narrationText has ALREADY been split at sentence boundaries. Do NOT split, merge, reorder, rewrite, or re-time them — treat each shot's narrationText as fixed.
+
+Return exactly ONE visual-treatment object per input shot, in the SAME order (one object for every shot, no more, no fewer). For each shot decide:
   - visualType: MUST be one of: cinematic_video | image_with_motion | atmospheric_broll
     * cinematic_video — primary "hero" shots driving the narrative
     * image_with_motion — quieter beats, character or environment portraits with subtle camera motion
@@ -60,12 +59,12 @@ For each shot decide:
     Target distribution: ~80% video shots (cinematic_video + atmospheric_broll combined)
     and ~20% image_with_motion shots. The pipeline enforces this ratio downstream,
     so picking close to it keeps your hero "cinematic_video:" choices intact.
-  - visualSummary: 1-2 sentence concrete visual description of what's on screen
+  - visualSummary: 1-2 sentence concrete visual description of what's on screen for this shot's narration
   - cameraMovement, lens
   - fxRecommendation: embers/smoke/glow intensity, filmGrain, vignette
   - transitionIn/Out
   - soundtrackMood (e.g. "tense_cello_drone", "wonder_choir_swell", "silence")
 Avoid repetitive cameras (no more than 2 same-type shots in a row).
-Output strict JSON: {"shots": [...]}.`;
+Output strict JSON: {"shots": [...]} with exactly the same number of objects as input shots, in order.`;
 
 export const PROMPT_SYSTEM = `You are not used for prompt generation — prompts are built deterministically from shot fields. This file exists only for parity with the other stages.`;

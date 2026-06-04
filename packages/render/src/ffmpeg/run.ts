@@ -18,6 +18,15 @@ export async function ffprobeDuration(path: string): Promise<number> {
   return Number.parseFloat(res.stdout.trim());
 }
 
+/**
+ * Grab the final frame of a video as a PNG. Used to build freeze-frame "still"
+ * holds: `-sseof -0.5` seeks to the last half-second and `-update 1` overwrites
+ * the output for every decoded frame, so the file left on disk is the last one.
+ */
+export async function extractLastFrame(videoPath: string, outPng: string): Promise<void> {
+  await ffmpeg(['-y', '-sseof', '-0.5', '-i', videoPath, '-update', '1', '-q:v', '2', outPng]);
+}
+
 /** True if the file has at least one audio stream. Used by the mixer to decide
  *  whether a video clip can be stream-copied as-is or needs a silent track. */
 export async function ffprobeHasAudio(path: string): Promise<boolean> {

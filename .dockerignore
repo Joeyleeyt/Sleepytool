@@ -17,6 +17,8 @@ tmp
 **/tmp
 fx-cache
 renders
+render-work
+**/render-work
 *.log
 .DS_Store
 .vscode

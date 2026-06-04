@@ -80,8 +80,10 @@ function kenBurnsExpr(mode: KenBurnsMode, totalFrames: number): { zoom: string; 
       return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(1-on/${frames})`, y: cy };
     case 'right':
       return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(on/${frames})`, y: cy };
-    case 'in':
     case 'none':
+      // Truly static — a frozen still (used for freeze-frame holds).
+      return { zoom: '1', x: cx, y: cy };
+    case 'in':
     default:
       return { zoom: `(1+${up})`, x: cx, y: cy };
   }

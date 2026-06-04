@@ -16,10 +16,16 @@ export const promptsRepo = {
   },
 
   async findForShot(shotId: string, target: string) {
+    // Newest-first: a prompt rebuild (e.g. after a style/wording change) inserts
+    // a NEW row rather than overwriting, because inputHash is part of the unique
+    // key (shotId, target, inputHash). Without this ordering the worker could
+    // pick a stale prompt row and regenerate the old visual. Mirrors
+    // findLatestVisualForShot / findVisualByProject.
     const [row] = await db
       .select()
       .from(prompts)
       .where(and(eq(prompts.shotId, shotId), eq(prompts.target, target)))
+      .orderBy(desc(prompts.createdAt))
       .limit(1);
     return row ?? null;
   },
@@ -31,6 +37,24 @@ export const promptsRepo = {
 
   async findByShot(shotId: string) {
     return db.select().from(prompts).where(eq(prompts.shotId, shotId));
+  },
+
+  /**
+   * The most recent VISUAL prompt (everything except TTS) for one shot — i.e.
+   * the provider the shot was actually prompted for ('veo3' | '69labs.video' |
+   * '69labs.image'). This is the source of truth for routing a retry: it can't
+   * drift from how the shot was generated, unlike re-reading DISABLE_VEO3 in a
+   * different process. Newest-first so a DISABLE_VEO3 flip mid-project keeps the
+   * fresh row (mirrors findVisualByProject's ordering).
+   */
+  async findLatestVisualForShot(shotId: string) {
+    const [row] = await db
+      .select({ id: prompts.id, target: prompts.target })
+      .from(prompts)
+      .where(and(eq(prompts.shotId, shotId), ne(prompts.target, '69labs.tts')))
+      .orderBy(desc(prompts.createdAt))
+      .limit(1);
+    return row ?? null;
   },
 
   /**

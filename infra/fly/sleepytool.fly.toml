@@ -39,9 +39,10 @@ primary_region = 'lhr'
 [[vm]]
   # I/O-bound combined process (orchestrator + 69labs + veo3 — all wait on
   # external HTTP). RAM, not CPU, is the constraint: veo3 (conc 4) and labs
-  # (conc 8) each buffer whole video downloads in memory. 6gb gives those
-  # buffers + Node heap ~3.7x headroom even at pessimistic clip sizes; raise
-  # LABS_CONCURRENCY past 8 only alongside more RAM here.
+  # (labsImage + labsVideo, ~conc 4 each) each buffer whole video downloads in
+  # memory. 6gb gives those buffers + Node heap ~3.7x headroom even at
+  # pessimistic clip sizes; raise the LABS69_*_MAX_CONCURRENCY caps only
+  # alongside more RAM here.
   #
   # NOTE: shared-cpu machines cap at 2gb RAM per vCPU, so 6gb REQUIRES
   # shared-cpu-4x (max 8gb) — shared-cpu-2x would be rejected at 4gb max. The

@@ -5,17 +5,21 @@ interface BucketConfig {
   refillPerSec: number;
 }
 
-// 69labs published rate limits (req/min):
-//   images: 10, videos: 5, tts: 20, motion: 5
+// 69labs published rate limits (req/min), per https://69labs.vip/api-docs:
+//   POST /images/generate: 60, /videos/generate: 5, /tts/generate: 20,
+//   /motion-graphics/render: 10
+// NOTE: these are REQUEST-RATE caps, not concurrency. 69labs separately caps
+// CONCURRENT in-flight jobs per tier+job-type — enforced by the counting
+// semaphore in `concurrency.ts` (see `acquireSlot`), not here.
 // Token bucket: capacity = burst size, refill = sustained rate per second.
 const LIMITS: Record<string, BucketConfig> = {
   veo3: { capacity: 30, refillPerSec: 0.5 },
-  '69labs.image': { capacity: 8, refillPerSec: 10 / 60 },
+  '69labs.image': { capacity: 10, refillPerSec: 60 / 60 },
   '69labs.video': { capacity: 4, refillPerSec: 5 / 60 },
   '69labs.tts':   { capacity: 16, refillPerSec: 20 / 60 },
-  '69labs.motion':{ capacity: 4, refillPerSec: 5 / 60 },
+  '69labs.motion':{ capacity: 6, refillPerSec: 10 / 60 },
   // Generic '69labs' kept for back-compat with existing workers
-  '69labs':       { capacity: 8, refillPerSec: 10 / 60 },
+  '69labs':       { capacity: 10, refillPerSec: 60 / 60 },
   claude: { capacity: 100, refillPerSec: 5 },
 };
 

@@ -5,6 +5,15 @@ import { eventsRepo, projectsRepo, shotsRepo } from '@emberforge/db';
 const flow = new FlowProducer({ connection });
 const DISABLE_VEO3 = (process.env.DISABLE_VEO3 ?? 'false') === 'true';
 
+// Which external provider each fan-out queue actually hits — so the logs answer
+// "did this asset go to 69labs or veo3?" without cross-referencing the workers.
+const QUEUE_PROVIDER: Record<string, string> = {
+  tts: '69labs',
+  labsImage: '69labs',
+  labsVideo: '69labs',
+  veo3: 'veo3',
+};
+
 /**
  * Fan out a job per shot per asset type and BLOCK until every leaf finishes.
  *
@@ -21,30 +30,49 @@ export async function generateAssetsStage(projectId: string) {
 
   const children: { name: string; queueName: string; data: unknown }[] = [];
 
-  for (const shot of shots) {
-    // TTS for every shot
-    children.push({ name: 'tts', queueName: 'tts', data: { projectId, shotId: shot.id } });
+  // Track what we fanned out, broken down by queue, so we can both log a
+  // per-shot trail and emit a summary of "how many of each / which provider".
+  const enqueue = (queueName: string, data: unknown, asset: string, shotId: string) => {
+    children.push({ name: queueName, queueName, data });
+    console.log(
+      `[generateAssets] enqueued ${asset.padEnd(11)} -> ${queueName.padEnd(10)} (${QUEUE_PROVIDER[queueName]})  shot=${shotId}`,
+    );
+  };
 
-    // Visual job
+  for (const shot of shots) {
+    // TTS (narration audio) for every shot
+    enqueue('tts', { projectId, shotId: shot.id }, 'narration', shot.id);
+
+    // Visual job — routed by visualType
     switch (shot.visualType) {
       case 'cinematic_video':
         if (DISABLE_VEO3) {
-          children.push({ name: 'labsVideo', queueName: 'labs', data: { projectId, shotId: shot.id, kind: 'video' } });
+          enqueue('labsVideo', { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
         } else {
-          children.push({ name: 'veo3', queueName: 'veo3', data: { projectId, shotId: shot.id } });
+          enqueue('veo3', { projectId, shotId: shot.id }, 'video_clip', shot.id);
         }
         break;
       case 'image_with_motion':
-        children.push({ name: 'labsImage', queueName: 'labs', data: { projectId, shotId: shot.id, kind: 'image' } });
+        enqueue('labsImage', { projectId, shotId: shot.id, kind: 'image' }, 'image', shot.id);
         break;
       case 'atmospheric_broll':
       case 'infographic':
       case 'animated_diagram':
       case 'motion_typography':
-        children.push({ name: 'labsVideo', queueName: 'labs', data: { projectId, shotId: shot.id, kind: 'video' } });
+        enqueue('labsVideo', { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
         break;
     }
   }
+
+  // Summary: count of children per queue, e.g. { tts: 20, veo3: 8, labsVideo: 12 }.
+  const byQueue = children.reduce<Record<string, number>>((acc, c) => {
+    acc[c.queueName] = (acc[c.queueName] ?? 0) + 1;
+    return acc;
+  }, {});
+  console.log(`[generateAssets] fan-out for project ${projectId}: ${shots.length} shots -> ${children.length} jobs`);
+  console.table(
+    Object.entries(byQueue).map(([queue, count]) => ({ queue, provider: QUEUE_PROVIDER[queue], count })),
+  );
 
   // Submit the assetsReady parent with all children. BullMQ keeps the parent
   // in 'waiting-children' until every leaf finishes.
@@ -56,7 +84,7 @@ export async function generateAssetsStage(projectId: string) {
   });
 
   await projectsRepo.setStatus(projectId, 'generating_assets');
-  await eventsRepo.emit(projectId, 'generateAssets', 'fanned_out', { jobs: children.length });
+  await eventsRepo.emit(projectId, 'generateAssets', 'fanned_out', { jobs: children.length, byQueue });
 
   // Block until the parent (and therefore every child) is done.
   const events = new QueueEvents('orchestrator', { connection });

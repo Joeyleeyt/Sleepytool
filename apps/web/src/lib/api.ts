@@ -80,11 +80,24 @@ export interface ShotWithAssets {
     visual: { provider: string; message: string; finishedAt: string | null } | null;
     narration: { provider: string; message: string; finishedAt: string | null } | null;
   };
+  /** Per-leg generation phase, derived server-side from the latest generation
+   *  row. `queued` = sitting in the labs-worker queue (no provider job yet);
+   *  `in_labs` = submitted to 69labs and rendering; `ready`/`failed` mirror the
+   *  asset/failure state. Drives the per-shot "Queued" / "On 69Labs" pill. */
+  progress: {
+    visual: LegPhase;
+    narration: LegPhase;
+  };
 }
+
+export type LegPhase = 'queued' | 'in_labs' | 'ready' | 'failed';
 
 export interface Progress {
   status: ProjectStatus;
-  shots: { total: number; ready: number; failed: number };
+  /** `ready` = both assets present; `failed` = shots blocked by a permanent
+   *  leg failure; `resolved` = ready + failed (shots done generating either
+   *  way) — drives the progress bar so a failure doesn't stall it short. */
+  shots: { total: number; ready: number; failed: number; resolved: number };
   updatedAt: string;
 }
 

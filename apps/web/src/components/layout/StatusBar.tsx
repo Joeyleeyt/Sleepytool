@@ -30,7 +30,9 @@ export function StatusBar() {
 
   const stageIdx = PIPELINE_STAGES.indexOf(data.status);
   const overallPct = stageIdx >= 0 ? (stageIdx + 1) / PIPELINE_STAGES.length : 0;
-  const shotsPct = data.shots.total > 0 ? data.shots.ready / data.shots.total : 0;
+  // Bar reflects shots that have finished generating (succeeded OR permanently
+  // failed) so a failed shot doesn't peg the bar below 100% indefinitely.
+  const shotsPct = data.shots.total > 0 ? data.shots.resolved / data.shots.total : 0;
   const inAssetStage = data.status === 'generating_assets';
   const tone =
     data.status === 'published' ? 'ok' :
@@ -52,6 +54,7 @@ export function StatusBar() {
       </div>
       <div className="text-text-dim tabular-nums">
         Assets {data.shots.ready}/{data.shots.total}
+        {data.shots.failed > 0 && <span className="text-bad ml-1.5">· {data.shots.failed} failed</span>}
       </div>
     </div>
   );

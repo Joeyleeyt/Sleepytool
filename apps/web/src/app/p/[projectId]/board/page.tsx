@@ -31,6 +31,11 @@ export default function BoardPage() {
 
   const filtered = useMemo(() => {
     if (filter === 'all') return allShots;
+    // "Generating" buckets both not-yet-done ('pending') and 'failed' shots —
+    // failed cards render with the same generating animation + retry, so they
+    // belong here. This mirrors the counts logic below (the `else` branch).
+    if (filter === 'pending')
+      return allShots.filter(({ shot }) => shot.status === 'pending' || shot.status === 'failed');
     return allShots.filter(({ shot }) => shot.status === filter);
   }, [allShots, filter]);
 

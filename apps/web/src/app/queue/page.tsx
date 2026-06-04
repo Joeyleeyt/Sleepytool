@@ -41,7 +41,9 @@ function QueueRow({ projectId, title, status }: { projectId: string; title: stri
     refetchInterval: 3000,
   });
 
-  const pct = data?.shots && data.shots.total > 0 ? data.shots.ready / data.shots.total : 0;
+  // Count resolved shots (ready + permanently failed) so a failure doesn't
+  // peg the bar below 100% — matches the bottom StatusBar.
+  const pct = data?.shots && data.shots.total > 0 ? data.shots.resolved / data.shots.total : 0;
 
   return (
     <Link

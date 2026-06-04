@@ -16,7 +16,15 @@ import {
 import { downloadToFile, r2Paths, uploadFile } from '@emberforge/storage';
 import { buildAssSubtitles } from '@emberforge/timeline-engine';
 import type { Timeline, TimelineClip } from '@emberforge/core';
-import { mixClips, finalEncode, mixAudio, type KenBurnsMode, type MixSegment } from '@emberforge/render';
+import {
+  mixClips,
+  finalEncode,
+  mixAudio,
+  extractLastFrame,
+  isImageInput,
+  type KenBurnsMode,
+  type MixSegment,
+} from '@emberforge/render';
 
 const log = pino({ name: 'render-worker' });
 
@@ -144,13 +152,30 @@ async function runComposite(projectId: string) {
     );
 
     // Build the ordered segment list. Inputs are already 1K/HD, so the mixer
-    // only fits each clip/image to the target frame — no upscaling. Images get
-    // Ken Burns motion; video clips are stream-copied with their own audio.
-    const segments: MixSegment[] = work.map((it) => ({
-      path: localByKey.get(it.video.r2Key)!,
-      durationS: it.clip.endS - it.clip.startS,
-      kenBurns: cameraToKenBurns(it.shot.cameraMovement ?? 'ken_burns_in'),
-    }));
+    // only fits each clip/image to the target frame — no upscaling. Video clips
+    // are stream-copied with their own audio; Ken Burns stills get motion;
+    // 'freeze' clips hold the source clip's last frame statically (silent).
+    const freezeDir = path.join(WORK_DIR, projectId, 'freezes');
+    await mkdir(freezeDir, { recursive: true });
+    const segments: MixSegment[] = await mapLimit(work, MIX_CONCURRENCY, async (it, i) => {
+      const durationS = it.clip.endS - it.clip.startS;
+      const sourcePath = localByKey.get(it.video.r2Key)!;
+      if (it.clip.kind === 'freeze') {
+        // Hold a frozen still: extract the source clip's last frame (or reuse it
+        // directly if the source asset is already an image), shown static.
+        let stillPath = sourcePath;
+        if (!isImageInput(sourcePath)) {
+          stillPath = path.join(freezeDir, `freeze_${i.toString().padStart(4, '0')}.png`);
+          await extractLastFrame(sourcePath, stillPath);
+        }
+        return { path: stillPath, durationS, kenBurns: 'none' as KenBurnsMode };
+      }
+      return {
+        path: sourcePath,
+        durationS,
+        kenBurns: cameraToKenBurns(it.shot.cameraMovement ?? 'ken_burns_in'),
+      };
+    });
 
     // Mix video clips + images into one HD master in a single fast pass.
     log.info({ projectId, segments: segments.length }, '[composite] mixing clips');
@@ -199,10 +224,16 @@ async function runAudioMix(projectId: string): Promise<string> {
     const assets = await assetsRepo.findByProject(projectId);
     const assetById = new Map(assets.map((a) => [a.id, a]));
 
-    log.info({ projectId, clips: tl.clips.length }, '[audioMix] downloading narration');
+    // Freeze stills are silent holds — they carry no narration, so the mix just
+    // leaves a gap (the held frame plays with no voice over it).
+    const narratedClips = tl.clips.filter((c) => c.kind !== 'freeze' && c.narrationAssetId);
+    log.info(
+      { projectId, clips: tl.clips.length, narrated: narratedClips.length },
+      '[audioMix] downloading narration',
+    );
     const narration = await Promise.all(
-      tl.clips.map(async (c) => ({
-        path: await localFor(assetById.get(c.narrationAssetId)!.r2Key),
+      narratedClips.map(async (c) => ({
+        path: await localFor(assetById.get(c.narrationAssetId!)!.r2Key),
         startS: c.startS,
         durationS: c.endS - c.startS,
         gainDb: 0,

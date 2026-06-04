@@ -24,6 +24,7 @@ function fmt(t: number): string {
 export function buildAssSubtitles(timeline: Timeline, narrationByClip: Map<string, string>): string {
   const events: string[] = [];
   for (const clip of timeline.clips) {
+    if (clip.kind === 'freeze') continue; // silent held still — no subtitle line
     const text = (narrationByClip.get(clip.shotId) ?? '').replace(/\n/g, ' ').replace(/,/g, '\\,');
     if (!text) continue;
     events.push(`Dialogue: 0,${fmt(clip.startS)},${fmt(clip.endS)},Default,,0,0,0,,${text}`);

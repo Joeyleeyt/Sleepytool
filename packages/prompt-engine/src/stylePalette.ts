@@ -6,6 +6,15 @@ const NEGATIVE_COMMON =
 export interface StylePalette {
   grade: string;
   lighting: string;
+  /**
+   * In-scene atmosphere baked into the AI-generation prompt. This must NOT
+   * include effects the render pipeline overlays at composite time — embers,
+   * drifting smoke and film grain are applied as FFmpeg overlays in
+   * compositeShot (driven by each shot's fxRecommendation / embersDefault).
+   * Putting those words here too made the AI bake fire/smoke into the clip
+   * AND get the overlay on top, producing the doubled "fiery" look. Keep this
+   * to atmosphere the renderer can't synthesize (fog, dust, nebulae, light leaks).
+   */
   ambient: string;
   negative: string;
   embersDefault: 'subtle' | 'medium' | 'heavy';
@@ -15,7 +24,7 @@ export const PALETTES: Record<StylePresetId, StylePalette> = {
   cinematic_dark_ember: {
     grade: 'teal-and-orange cinematic documentary grade, deep shadows, crushed blacks, golden highlights',
     lighting: 'volumetric god rays, soft rim light, low-key dramatic',
-    ambient: 'floating embers, drifting smoke, volumetric fog, dust motes',
+    ambient: 'volumetric fog, dust motes',
     negative: NEGATIVE_COMMON,
     embersDefault: 'medium',
   },
@@ -29,14 +38,14 @@ export const PALETTES: Record<StylePresetId, StylePalette> = {
   noir_documentary: {
     grade: 'desaturated, high contrast, monochromatic with warm amber accents',
     lighting: 'hard side light, deep shadows, venetian blinds, smoky haze',
-    ambient: 'cigarette smoke drift, dust, slow fog',
+    ambient: 'dust, slow haze',
     negative: NEGATIVE_COMMON,
     embersDefault: 'subtle',
   },
   warm_archival: {
     grade: 'warm sepia, faded color, slight color cast, soft contrast',
     lighting: 'soft window light, golden hour, gentle bounce',
-    ambient: 'fine grain, light leaks',
+    ambient: 'light leaks',
     negative: NEGATIVE_COMMON,
     embersDefault: 'subtle',
   },

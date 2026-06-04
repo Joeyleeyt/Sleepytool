@@ -90,6 +90,28 @@ function parseRetryAfter(res: Response): number | undefined {
   return undefined;
 }
 
+// Error responses from the edge (Cloudflare 5xx, nginx 502) are full HTML
+// pages — dumping them verbatim into an Error message floods the worker logs
+// with hundreds of unreadable lines. Collapse an HTML body to just its <title>
+// (e.g. "69labs.vip | 522: Connection timed out") and cap everything else.
+function summarizeBody(text: string, max = 300): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '(empty body)';
+  if (/^<(?:!doctype|html|\?xml)/i.test(trimmed)) {
+    const title = trimmed.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim();
+    return title ? `<html: ${title}>` : '<html error page>';
+  }
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+async function httpError(path: string, res: Response): Promise<Error> {
+  const text = await res.text().catch(() => '');
+  return Object.assign(new Error(`69labs ${path} ${res.status}: ${summarizeBody(text)}`), {
+    status: res.status,
+    retryAfterMs: parseRetryAfter(res),
+  });
+}
+
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   return withRetry(async () => {
     const res = await fetch(`${BASE}${path}`, {
@@ -97,13 +119,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       headers: { ...AUTH(), 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw Object.assign(new Error(`69labs ${path} ${res.status}: ${text}`), {
-        status: res.status,
-        retryAfterMs: parseRetryAfter(res),
-      });
-    }
+    if (!res.ok) throw await httpError(path, res);
     return (await res.json()) as T;
   });
 }
@@ -111,13 +127,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 async function getJson<T>(path: string): Promise<T> {
   return withRetry(async () => {
     const res = await fetch(`${BASE}${path}`, { headers: AUTH() });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw Object.assign(new Error(`69labs ${path} ${res.status}: ${text}`), {
-        status: res.status,
-        retryAfterMs: parseRetryAfter(res),
-      });
-    }
+    if (!res.ok) throw await httpError(path, res);
     return (await res.json()) as T;
   });
 }
@@ -126,10 +136,17 @@ async function getJson<T>(path: string): Promise<T> {
 async function pollUntilDone(
   statusPath: string,
   intervalMs: number = POLL_INTERVAL_MS,
+  onStatus?: (status: JobStatus) => void,
 ): Promise<JobStatusResp> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let last: JobStatus | undefined;
   while (Date.now() < deadline) {
     const s = await getJson<JobStatusResp>(statusPath);
+    // Notify only on transitions so the caller's log isn't spammed every poll.
+    if (onStatus && s.status !== last) {
+      last = s.status;
+      onStatus(s.status);
+    }
     if (s.status === 'COMPLETED') return s;
     if (s.status === 'FAILED' || s.status === 'CANCELLED') {
       throw new Error(`69labs job ${s.id} ${s.status}`);
@@ -158,8 +175,16 @@ async function resolveDownloadUrl(downloadPath: string): Promise<string> {
   // res.url is the final URL.
   if (res.status >= 300 && res.status < 400 && location) return location;
   if (res.ok && res.url) return res.url;
-  const text = await res.text().catch(() => '');
-  throw new Error(`69labs ${downloadPath} ${res.status}${text ? ': ' + text : ''}`);
+  throw await httpError(downloadPath, res);
+}
+
+/**
+ * Cancel an in-flight job so it stops occupying a provider concurrency slot.
+ * Best-effort: a job that already reached a terminal state returns 404/400,
+ * which we swallow. `kind` is the URL segment ('images' | 'videos').
+ */
+async function cancelJob(kind: string, id: string): Promise<void> {
+  await fetch(`${BASE}/${kind}/cancel/${id}`, { method: 'POST', headers: AUTH() }).catch(() => {});
 }
 
 // ============ TTS ============
@@ -212,6 +237,13 @@ export const labs69 = {
     resolution?: '1k' | '2k' | '4k' | string;
     seed?: number;
     imageUrls?: string[];
+    // Called the instant the job id is known (right after submit), before the
+    // long poll. Lets the worker persist the id so an in-flight job can be
+    // cancelled/reaped if this process dies mid-poll.
+    onSubmit?: (jobId: string) => void | Promise<void>;
+    // Called on each 69labs status transition (PENDING→PROCESSING→…) so the
+    // caller can show where the job is while it sits at the provider.
+    onStatus?: (status: JobStatus) => void;
   }): Promise<BaseResult> {
     const create = await postJson<JobCreate>('/images/generate', {
       prompt: input.prompt,
@@ -221,17 +253,26 @@ export const labs69 = {
       seed: input.seed,
       imageUrls: input.imageUrls,
     });
-    const done = await pollUntilDone(`/images/status/${create.id}`);
-    const url = await resolveDownloadUrl(`/images/download/${create.id}`);
-    return {
-      url,
-      providerJobId: create.id,
-      metadata: {
-        format: done.outputMetadata?.format ?? 'png',
-        width: done.outputMetadata?.width,
-        height: done.outputMetadata?.height,
-      },
-    };
+    await input.onSubmit?.(create.id);
+    try {
+      const done = await pollUntilDone(`/images/status/${create.id}`, POLL_INTERVAL_MS, input.onStatus);
+      const url = await resolveDownloadUrl(`/images/download/${create.id}`);
+      return {
+        url,
+        providerJobId: create.id,
+        metadata: {
+          format: done.outputMetadata?.format ?? 'png',
+          width: done.outputMetadata?.width,
+          height: done.outputMetadata?.height,
+        },
+      };
+    } catch (err) {
+      // Poll timeout / download error / CENSORED: cancel so we don't leak a
+      // concurrency slot. (FAILED/CANCELLED are already terminal — cancel is a
+      // harmless no-op there.)
+      await cancelJob('images', create.id);
+      throw err;
+    }
   },
 
   async video(input: {
@@ -244,6 +285,8 @@ export const labs69 = {
     mode?: 'normal' | 'spicy' | 'fun';
     imageUrls?: string[];
     mute?: boolean;
+    onSubmit?: (jobId: string) => void | Promise<void>;
+    onStatus?: (status: JobStatus) => void;
   }): Promise<BaseResult & { durationS: number }> {
     // 69labs `duration` field is a STRING like "5" / "10" — but their default
     // model (Veo 3.1 Lite) and several others reject it with 400
@@ -272,18 +315,24 @@ export const labs69 = {
       imageUrls: input.imageUrls,
       mute: input.mute,
     });
-    const done = await pollUntilDone(`/videos/status/${create.id}`, VIDEO_POLL_INTERVAL_MS);
-    const url = await resolveDownloadUrl(`/videos/download/${create.id}`);
-    return {
-      url,
-      providerJobId: create.id,
-      durationS: done.outputMetadata?.durationSeconds ?? (input.durationS ?? 8),
-      metadata: {
-        format: done.outputMetadata?.format ?? 'mp4',
-        width: done.outputMetadata?.width,
-        height: done.outputMetadata?.height,
-      },
-    };
+    await input.onSubmit?.(create.id);
+    try {
+      const done = await pollUntilDone(`/videos/status/${create.id}`, VIDEO_POLL_INTERVAL_MS, input.onStatus);
+      const url = await resolveDownloadUrl(`/videos/download/${create.id}`);
+      return {
+        url,
+        providerJobId: create.id,
+        durationS: done.outputMetadata?.durationSeconds ?? (input.durationS ?? 8),
+        metadata: {
+          format: done.outputMetadata?.format ?? 'mp4',
+          width: done.outputMetadata?.width,
+          height: done.outputMetadata?.height,
+        },
+      };
+    } catch (err) {
+      await cancelJob('videos', create.id);
+      throw err;
+    }
   },
 
   async motionGraphics(input: {
@@ -305,6 +354,15 @@ export const labs69 = {
   },
 
   // ----- helpers + discovery -----
+
+  /**
+   * Cancel an in-flight job by id, freeing its provider concurrency slot.
+   * `kind` is the URL segment: 'images' | 'videos' | 'motion-graphics'.
+   * Used by scripts/reap-69labs-orphans.ts to clear leaked jobs.
+   */
+  async cancel(kind: 'images' | 'videos' | 'motion-graphics', id: string): Promise<void> {
+    await cancelJob(kind, id);
+  },
 
   async listImageModels() {
     return getJson<{ models: { id: string; name: string; cost: number }[]; defaultModelId: string }>(

@@ -1,14 +1,28 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
-import { Worker } from 'bullmq';
+import { Worker, type Job } from 'bullmq';
 import pino from 'pino';
-import { acquire, connection } from '@emberforge/queue';
+import { acquire, acquireSlot, connection } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
 import { labs69 } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
 
 const log = pino({ name: 'labs-worker' });
+
+// 69labs caps CONCURRENT in-flight jobs per tier+job-type (separate from the
+// req/min rate limit). Exceeding it returns `403 Concurrent ... limit reached`.
+// We gate submits through a distributed semaphore so any number of prompts can
+// be enqueued at once and they pipeline through at most N concurrent jobs.
+// Defaults to the plan's cap (4); override per-kind via env.
+const IMAGE_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_MAX_CONCURRENCY ?? 4));
+const VIDEO_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_MAX_CONCURRENCY ?? 4));
+
+// Provider job ids currently in flight (id -> URL segment), so we can cancel
+// them on shutdown instead of orphaning them — orphaned jobs keep occupying a
+// concurrency slot on 69labs and eventually exhaust the cap. The `--watch` dev
+// restart was the main culprit.
+const inflight = new Map<string, 'images' | 'videos'>();
 
 async function downloadToTmp(url: string, fileName: string): Promise<string> {
   const tmp = path.join(os.tmpdir(), fileName);
@@ -19,95 +33,165 @@ async function downloadToTmp(url: string, fileName: string): Promise<string> {
   return tmp;
 }
 
-new Worker(
-  'labs',
-  async (job) => {
-    const { projectId, shotId, kind } = job.data as { projectId: string; shotId: string; kind: 'image' | 'video' };
-    const shot = await shotsRepo.findById(shotId);
-    if (!shot) throw new Error(`shot ${shotId} not found`);
+// One shot's image OR video generation. Shared by both the labsImage and
+// labsVideo workers — `job.data.kind` selects the branch. 69labs image and
+// video are independent features (separate rate limits and concurrency caps),
+// so each runs on its own queue/worker; this handler is the common body.
+async function processShot(job: Job) {
+  const { projectId, shotId, kind } = job.data as { projectId: string; shotId: string; kind: 'image' | 'video' };
 
-    const assetKind = kind === 'image' ? 'image' : 'video_clip';
-    const cached = await assetsRepo.findByShotKind(shotId, assetKind);
-    if (cached) {
-      await eventsRepo.emit(projectId, 'labs', 'cached', { shotId, kind });
-      return { cached: true, assetId: cached.id };
-    }
+  // Where is this shot right now? `loc` is WORKER while we do local work
+  // (cache/prompt/slot/download/upload) and 69LABS once it's submitted and we
+  // are only polling the provider. Printed to the console so all shots' states
+  // are visible at a glance.
+  const tag = `labs:${kind}`;
+  const phase = (loc: 'WORKER' | '69LABS', phase: string, extra = '') =>
+    console.log(`[${tag}] shot=${shotId} loc=${loc.padEnd(6)} phase=${phase}${extra}`);
 
-    const target = kind === 'image' ? '69labs.image' : '69labs.video';
-    const prompt = await promptsRepo.findForShot(shotId, target);
-    if (!prompt) throw new Error(`no ${target} prompt for shot ${shotId}`);
+  phase('WORKER', 'picked_up');
+  const shot = await shotsRepo.findById(shotId);
+  if (!shot) throw new Error(`shot ${shotId} not found`);
 
-    const generation = await generationsRepo.create({
-      promptId: prompt.id,
-      provider: target,
-      status: 'queued',
+  const assetKind = kind === 'image' ? 'image' : 'video_clip';
+  const cached = await assetsRepo.findByShotKind(shotId, assetKind);
+  if (cached) {
+    phase('WORKER', 'cached', ` asset=${cached.id}`);
+    await eventsRepo.emit(projectId, 'labs', 'cached', { shotId, kind });
+    return { cached: true, assetId: cached.id };
+  }
+
+  const target = kind === 'image' ? '69labs.image' : '69labs.video';
+  const prompt = await promptsRepo.findForShot(shotId, target);
+  if (!prompt) throw new Error(`no ${target} prompt for shot ${shotId}`);
+
+  const generation = await generationsRepo.create({
+    promptId: prompt.id,
+    provider: target,
+    status: 'queued',
+  });
+
+  // Hold a concurrency slot for the whole submit→poll→download span so we
+  // never exceed the 69labs concurrent-job cap. Blocks here until a slot is
+  // free; the lease is reclaimed automatically if this worker crashes.
+  phase('WORKER', 'waiting_slot');
+  const slot = await acquireSlot(target, kind === 'image' ? IMAGE_MAX : VIDEO_MAX, {
+    leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
+  });
+  // Persist the provider job id the instant it's known so a mid-poll crash
+  // leaves a reapable record, and track it for shutdown cancellation.
+  let providerJobId: string | undefined;
+  const onSubmit = async (id: string) => {
+    providerJobId = id;
+    inflight.set(id, kind === 'image' ? 'images' : 'videos');
+    // The job now lives at 69labs; everything until COMPLETED is loc=69LABS.
+    phase('69LABS', 'submitted', ` job=${id}`);
+    await generationsRepo.markStarted(generation.id, id);
+  };
+  // Each 69labs status transition (PENDING→PROCESSING→FINALIZING→…).
+  const onStatus = (status: string) => phase('69LABS', status, providerJobId ? ` job=${providerJobId}` : '');
+  try {
+    await acquire(kind === 'image' ? '69labs.image' : '69labs.video');
+    await generationsRepo.markStarted(generation.id);
+    const t0 = Date.now();
+
+    phase('WORKER', 'submitting');
+    const result =
+      kind === 'image'
+        ? await labs69.image({
+            prompt: prompt.promptText,
+            negative: prompt.negative ?? undefined,
+            onStatus,
+            // Full HD target: 2k (~2048×1152) is the smallest 69labs tier that
+            // fully covers a 1920×1080 frame, so it downscales to crisp Full HD
+            // (1k is sub-1080p and would be upscaled). nano-banana models
+            // accept 1k|2k|4k; override via LABS69_IMAGE_RESOLUTION.
+            aspectRatio: '16:9',
+            resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
+            onSubmit,
+          })
+        : await labs69.video({
+            prompt: prompt.promptText,
+            negative: prompt.negative ?? undefined,
+            durationS: Number(shot.durationS),
+            // Intentionally NOT passing aspectRatio / resolution — the
+            // default 69labs video model (Veo 3.1 Lite) rejects both with
+            // 400. Output is native 16:9 at the model's chosen size and
+            // gets scaled to the project's targetRes in the final encode.
+            onSubmit,
+            onStatus,
+          });
+
+    // Back in the worker: COMPLETED at 69labs, now pulling + storing the bytes.
+    phase('WORKER', 'downloading');
+    const ext = kind === 'image' ? 'png' : 'mp4';
+    const tmp = await downloadToTmp(result.url, `labs_${shotId}.${ext}`);
+    phase('WORKER', 'uploading');
+    const key =
+      kind === 'image'
+        ? r2Paths.shotImage(projectId, shotId, prompt.inputHash)
+        : r2Paths.shotVideo(projectId, shotId, prompt.inputHash);
+    const uploaded = await uploadFile(tmp, key, kind === 'image' ? 'image/png' : 'video/mp4');
+    await unlink(tmp).catch(() => {});
+
+    const asset = await assetsRepo.create({
+      projectId,
+      shotId,
+      generationId: generation.id,
+      kind: assetKind,
+      r2Key: uploaded.key,
+      bytes: uploaded.bytes,
+      durationS: kind === 'video' ? String(Number(shot.durationS)) : null,
+      metadata: { providerJobId: result.providerJobId },
     });
 
-    try {
-      await acquire(kind === 'image' ? '69labs.image' : '69labs.video');
-      await generationsRepo.markStarted(generation.id);
-      const t0 = Date.now();
+    await generationsRepo.markSucceeded(generation.id, {
+      providerJobId: result.providerJobId,
+      latencyMs: Date.now() - t0,
+    });
+    phase('WORKER', 'done', ` asset=${asset.id}`);
+    await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind });
+    return { assetId: asset.id };
+  } catch (err) {
+    phase('WORKER', 'failed', ` err=${(err as Error).message}`);
+    await generationsRepo.markFailed(generation.id, { message: (err as Error).message });
+    log.error({ shotId, err }, '69labs failed');
+    throw err;
+  } finally {
+    // labs69.image/video already cancels the provider job on failure, so by
+    // here it's either done or cancelled — drop it from the in-flight set and
+    // free the concurrency slot for the next queued prompt.
+    if (providerJobId) inflight.delete(providerJobId);
+    await slot.release();
+  }
+}
 
-      const result =
-        kind === 'image'
-          ? await labs69.image({
-              prompt: prompt.promptText,
-              negative: prompt.negative ?? undefined,
-              // Full HD target: 2k (~2048×1152) is the smallest 69labs tier that
-              // fully covers a 1920×1080 frame, so it downscales to crisp Full HD
-              // (1k is sub-1080p and would be upscaled). nano-banana models
-              // accept 1k|2k|4k; override via LABS69_IMAGE_RESOLUTION.
-              aspectRatio: '16:9',
-              resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
-            })
-          : await labs69.video({
-              prompt: prompt.promptText,
-              negative: prompt.negative ?? undefined,
-              durationS: Number(shot.durationS),
-              // Intentionally NOT passing aspectRatio / resolution — the
-              // default 69labs video model (Veo 3.1 Lite) rejects both with
-              // 400. Output is native 16:9 at the model's chosen size and
-              // gets scaled to the project's targetRes in the final encode.
-            });
+// Two independent workers, one per 69labs feature, so image and video generate
+// on separate tracks: a backlog of slow video jobs can never head-of-line block
+// image jobs (or vice versa). Each worker's BullMQ concurrency matches its
+// per-kind slot cap — `acquireSlot` is the real cross-process limit, so pulling
+// more jobs than free slots would only park them holding a BullMQ lock. Each
+// active job buffers one download in memory, so peak RAM ~= IMAGE_MAX + VIDEO_MAX.
+new Worker('labsImage', processShot, { connection, concurrency: IMAGE_MAX });
+new Worker('labsVideo', processShot, { connection, concurrency: VIDEO_MAX });
 
-      const ext = kind === 'image' ? 'png' : 'mp4';
-      const tmp = await downloadToTmp(result.url, `labs_${shotId}.${ext}`);
-      const key =
-        kind === 'image'
-          ? r2Paths.shotImage(projectId, shotId, prompt.inputHash)
-          : r2Paths.shotVideo(projectId, shotId, prompt.inputHash);
-      const uploaded = await uploadFile(tmp, key, kind === 'image' ? 'image/png' : 'video/mp4');
-      await unlink(tmp).catch(() => {});
+// On shutdown (incl. the `--watch` dev restart), cancel any in-flight 69labs
+// jobs so they release their concurrency slots instead of orphaning and
+// exhausting the cap. Best-effort, time-boxed so we don't hang the exit.
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const jobs = [...inflight.entries()];
+  if (jobs.length) {
+    log.warn({ signal, count: jobs.length }, 'cancelling in-flight 69labs jobs before exit');
+    await Promise.race([
+      Promise.allSettled(jobs.map(([id, kind]) => labs69.cancel(kind, id))),
+      new Promise((r) => setTimeout(r, 5_000)),
+    ]);
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
 
-      const asset = await assetsRepo.create({
-        projectId,
-        shotId,
-        generationId: generation.id,
-        kind: assetKind,
-        r2Key: uploaded.key,
-        bytes: uploaded.bytes,
-        durationS: kind === 'video' ? String(Number(shot.durationS)) : null,
-        metadata: { providerJobId: result.providerJobId },
-      });
-
-      await generationsRepo.markSucceeded(generation.id, {
-        providerJobId: result.providerJobId,
-        latencyMs: Date.now() - t0,
-      });
-      await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind });
-      return { assetId: asset.id };
-    } catch (err) {
-      await generationsRepo.markFailed(generation.id, { message: (err as Error).message });
-      log.error({ shotId, err }, '69labs failed');
-      throw err;
-    }
-  },
-  // 69labs limits (~10/min image, ~5/min video) gate throughput; the rate
-  // limiter is the real backstop. Each job buffers a video/image download in
-  // memory, so concurrency sets peak memory on the `workers` machine — size the
-  // VM RAM accordingly (8 ⇒ 6gb). Default 8; LABS_CONCURRENCY overrides.
-  // See infra/fly/sleepytool.fly.toml.
-  { connection, concurrency: Math.max(1, Number(process.env.LABS_CONCURRENCY ?? 8)) },
-);
-
-log.info('labs-worker started');
+log.info({ imageMax: IMAGE_MAX, videoMax: VIDEO_MAX }, 'labs-worker started (labsImage + labsVideo)');

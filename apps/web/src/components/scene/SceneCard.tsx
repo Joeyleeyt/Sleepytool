@@ -12,6 +12,8 @@ import {
   Pause,
   RotateCcw,
   RefreshCw,
+  Loader2,
+  Cloud,
 } from 'lucide-react';
 import { Badge } from '@/components/primitives/Badge';
 import { cn } from '@/lib/utils';
@@ -43,6 +45,16 @@ export function SceneCard({
   const SourceIcon = SOURCE_ICON[shot.visualType] ?? Film;
   const isReady = shot.status === 'ready';
   const isFailed = shot.status === 'failed';
+
+  // Combined generation phase for the still-working legs: if any leg has been
+  // handed to 69labs it reads as "On 69Labs", otherwise it's still waiting in
+  // the worker queue. Drives the small status pill on the generating card.
+  const legs = [shot.progress.visual, shot.progress.narration];
+  const genPhase = legs.includes('in_labs')
+    ? ('in_labs' as const)
+    : legs.includes('queued')
+      ? ('queued' as const)
+      : null;
 
   // Which legs to retry — both by default, narrowed to whatever failed.
   const failedLegs = [
@@ -219,9 +231,35 @@ export function SceneCard({
           // reads as work-in-progress, not a neutral loading skeleton. A
           // failure should not look like an error/warning card.
           <>
-            <div className="absolute inset-0 generating-glow" />
-            <div className="absolute inset-0 generating-sweep" />
-            <SourceIcon size={28} className="relative text-ember-400 generating-icon" />
+            {/* <div className="absolute inset-0 generating-glow" /> */}
+            {/* <div className="absolute inset-0 generating-sweep" /> */}
+            {/* <SourceIcon size={28} className="relative text-ember-400 generating-icon" /> */}
+
+            {/* Status pill — tells the operator exactly where a still-working
+                shot is: waiting in the labs-worker queue vs already rendering on
+                69labs. Hidden for failed shots (the retry control covers that). */}
+            {!isFailed && genPhase && (
+              <span
+                className={cn(
+                  'absolute top-2 left-2 z-10 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium backdrop-blur-sm',
+                  genPhase === 'in_labs'
+                    ? 'bg-ember-500/20 text-ember-300'
+                    : 'bg-black/45 text-white/70',
+                )}
+              >
+                {genPhase === 'in_labs' ? (
+                  <>
+                    <Cloud size={11} />
+                    On 69Labs
+                  </>
+                ) : (
+                  <>
+                    <Loader2 size={11} className="animate-spin" />
+                    Queued
+                  </>
+                )}
+              </span>
+            )}
 
             {/* Failed shots stay visually identical to generating ones; a
                 subtle, neutral retry control surfaces only on hover so the
