@@ -25,10 +25,18 @@ export interface XfadeStep {
   overlapS: number;
 }
 
-export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts: { nvenc?: boolean }): Promise<void> {
+export async function buildXfadeChain(
+  steps: XfadeStep[],
+  outPath: string,
+  opts: { nvenc?: boolean; audio?: boolean },
+): Promise<void> {
+  // The sleep renderer drives a VIDEO-ONLY master (narration is a separate audio
+  // master muxed in at finalEncode), so audio acrossfade is opt-out. Defaults to
+  // true to preserve the original A+V behaviour for any other caller.
+  const audio = opts.audio ?? true;
   if (steps.length === 0) throw new Error('no steps');
   if (steps.length === 1) {
-    await ffmpeg(['-y', '-i', steps[0]!.path, '-c', 'copy', outPath]);
+    await ffmpeg(['-y', '-i', steps[0]!.path, '-c', 'copy', ...(audio ? [] : ['-an']), outPath]);
     return;
   }
 
@@ -66,18 +74,20 @@ export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts:
     const outV = `v${i}`;
     const outA = `a${i}`;
     vFilters.push(`[${prevV}][${i}:v]xfade=transition=${xfadeName}:duration=${overlap}:offset=${offset}[${outV}]`);
-    aFilters.push(`[${prevA}][${i}:a]acrossfade=d=${overlap}[${outA}]`);
     prevV = outV;
-    prevA = outA;
+    if (audio) {
+      aFilters.push(`[${prevA}][${i}:a]acrossfade=d=${overlap}[${outA}]`);
+      prevA = outA;
+    }
     acc = offset + s.durationS;
   }
 
   // Diagnostic: emit the full filter graph so failures show what was sent to
   // FFmpeg. Long chains (30+ shots) are noisy but invaluable when triaging
   // "xfade exploded somewhere" errors.
-  const filterGraph = [...vFilters, ...aFilters].join(';');
+  const filterGraph = (audio ? [...vFilters, ...aFilters] : vFilters).join(';');
   // eslint-disable-next-line no-console
-  console.log(`[xfadeChain] steps=${steps.length} filter_complex length=${filterGraph.length}`);
+  console.log(`[xfadeChain] steps=${steps.length} audio=${audio} filter_complex length=${filterGraph.length}`);
 
   // This master is an INTERMEDIATE — the final encode re-encodes it again — so
   // use the fast intermediate knobs rather than the high-quality final preset.
@@ -85,20 +95,21 @@ export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts:
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '22';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '22';
-  const args = [
+  const audioArgs = audio ? ['-map', `[${prevA}]`, '-c:a', 'aac', '-b:a', '192k'] : ['-an'];
+  const build = (nvenc: boolean): string[] => [
     ...inputs,
     '-filter_complex', filterGraph,
-    '-map', `[${prevV}]`, '-map', `[${prevA}]`,
-    '-c:v', opts.nvenc ? 'h264_nvenc' : 'libx264',
-    ...(opts.nvenc ? ['-preset', nvencPreset, '-cq', nvencCq] : ['-preset', x264Preset, '-crf', x264Crf]),
+    '-map', `[${prevV}]`,
+    ...audioArgs,
+    '-c:v', nvenc ? 'h264_nvenc' : 'libx264',
+    ...(nvenc ? ['-preset', nvencPreset, '-cq', nvencCq] : ['-preset', x264Preset, '-crf', x264Crf]),
     '-pix_fmt', 'yuv420p',
-    '-c:a', 'aac', '-b:a', '192k',
     '-movflags', '+faststart',
     outPath,
   ];
 
   try {
-    await ffmpeg(args);
+    await ffmpeg(build(!!opts.nvenc));
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
     const isNvenc =
@@ -108,17 +119,6 @@ export async function buildXfadeChain(steps: XfadeStep[], outPath: string, opts:
     if (!isNvenc) throw err;
     // eslint-disable-next-line no-console
     console.warn('[xfadeChain] NVENC failed, retrying with libx264. Reason:', msg.slice(0, 200));
-    const fallback = [
-      ...inputs,
-      '-filter_complex', [...vFilters, ...aFilters].join(';'),
-      '-map', `[${prevV}]`, '-map', `[${prevA}]`,
-      '-c:v', 'libx264',
-      '-preset', x264Preset, '-crf', x264Crf,
-      '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac', '-b:a', '192k',
-      '-movflags', '+faststart',
-      outPath,
-    ];
-    await ffmpeg(fallback);
+    await ffmpeg(build(false));
   }
 }

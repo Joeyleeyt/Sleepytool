@@ -1,6 +1,6 @@
 import { asc, eq } from 'drizzle-orm';
 import { db } from '../client.js';
-import { shots } from '../schema/index.js';
+import { scenes, shots } from '../schema/index.js';
 
 export const shotsRepo = {
   async bulkInsert(rows: (typeof shots.$inferInsert)[]) {
@@ -8,8 +8,22 @@ export const shotsRepo = {
     return db.insert(shots).values(rows).returning();
   },
 
+  /**
+   * Project-wide shot order MUST be (scene order, shot-within-scene order).
+   * `shots.ordinal` is per-scene (it resets to 0 for each scene — see the
+   * (scene_id, ordinal) unique index), so ordering by it alone interleaves
+   * scenes (every scene's shot 0, then every scene's shot 1, …) and ties are
+   * broken arbitrarily. Joining scenes and ordering by `scenes.ordinal` first
+   * gives the true narrative order the timeline/render pipeline depends on.
+   */
   async findByProject(projectId: string) {
-    return db.select().from(shots).where(eq(shots.projectId, projectId)).orderBy(asc(shots.ordinal));
+    const rows = await db
+      .select({ shot: shots })
+      .from(shots)
+      .innerJoin(scenes, eq(shots.sceneId, scenes.id))
+      .where(eq(shots.projectId, projectId))
+      .orderBy(asc(scenes.ordinal), asc(shots.ordinal));
+    return rows.map((r) => r.shot);
   },
 
   async findByScene(sceneId: string) {

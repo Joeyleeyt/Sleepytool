@@ -22,14 +22,42 @@ import {
   mixAudio,
   extractLastFrame,
   isImageInput,
+  buildSleepMaster,
   type KenBurnsMode,
   type MixSegment,
+  type SleepClip,
 } from '@emberforge/render';
 
 const log = pino({ name: 'render-worker' });
 
 const WORK_DIR = process.env.RENDER_WORK_DIR ?? path.join(os.tmpdir(), 'emberforge');
 const NVENC = (process.env.NVENC_ENABLED ?? 'true') === 'true';
+
+// --- Sleep-story renderer ----------------------------------------------------
+// Transforms the composite into a slow, hypnotic sequence where every clip
+// cross-dissolves into the next (no hard cuts, no flashy transitions). Set
+// SLEEP_RENDER=false to fall back to the legacy hard-cut concat path.
+const SLEEP_RENDER = (process.env.SLEEP_RENDER ?? 'true') !== 'false';
+// Default crossfade between clips within the same script scene (seconds).
+const SLEEP_CROSSFADE_DURATION = Number(process.env.SLEEP_CROSSFADE_DURATION ?? '2.0');
+// Crossfade across a scene boundary (the "dissolve between scenes"). Defaults to
+// the within-scene value so scene seams are just as soft.
+const SLEEP_SCENE_CROSSFADE_DURATION = Number(
+  process.env.SLEEP_SCENE_CROSSFADE_DURATION ?? String(SLEEP_CROSSFADE_DURATION),
+);
+// Ken Burns zoom ceiling for stills / frozen tails (1.02 = 2% push over a clip).
+const SLEEP_KENBURNS_MAX_ZOOM = Number(process.env.SLEEP_KENBURNS_MAX_ZOOM ?? '1.02');
+
+/**
+ * Sleep renderer permits a cross-dissolve only. Any flashy transition the
+ * upstream classifier emitted (whip / glitch / slide-like / lightleak / morph /
+ * ember_sweep / dip_to_black) collapses to a gentle 'fade'. Structured as a
+ * single chokepoint so future SAFE per-scene transition types can be
+ * allow-listed here without changing anything downstream.
+ */
+function sleepTransition(_transition: string | undefined): string {
+  return 'fade';
+}
 
 const CPU_COUNT = Math.max(1, os.cpus()?.length ?? 4);
 // Per-shot composites are independent, so we run several FFmpeg processes at
@@ -97,6 +125,98 @@ function cameraToKenBurns(camera: string): KenBurnsMode {
   }
 }
 
+/**
+ * Build the sleep-story video master: every clip cross-dissolves into the next.
+ *
+ * Timing model (keeps narration authoritative, never shortens the timeline):
+ *   D[i]       = narration duration of clip i  (endS - startS — the schedule)
+ *   o[i]       = crossfade overlap INTO clip i = min(X, 0.4·min(D[i-1], D[i]))
+ *   clipLen[i] = D[i] + o[i+1]   (last clip has no trailing fade ⇒ clipLen = D)
+ * Fed to buildXfadeChain these give offset[i] = Σ_{k<i} D[k] = startS[i] exactly
+ * and a total of Σ D = the narration length, so the separate narration master
+ * (placed at absolute startS) stays in sync and the overlaps self-cancel.
+ *
+ * The 0.4·min(D) clamp matches buildXfadeChain's own overlap clamp, so the
+ * lengths we compute here and the offsets it computes never disagree.
+ */
+async function renderSleepMaster(args: {
+  projectId: string;
+  tl: Timeline;
+  shotById: Map<string, { sceneId: string }>;
+  assetById: Map<string, { r2Key: string }>;
+  outPath: string;
+  width: number;
+  height: number;
+  fps: number;
+}): Promise<void> {
+  const { projectId, tl, shotById, assetById } = args;
+  const clips = tl.clips;
+  const N = clips.length;
+  if (N === 0) throw new Error('sleep render: timeline has no clips');
+
+  // D[i] = narration duration of clip i (the authoritative schedule).
+  const D = clips.map((c) => c.endS - c.startS);
+
+  // o[i] = crossfade overlap of the dissolve INTO clip i (0 for the first clip).
+  const overlaps = new Array<number>(N).fill(0);
+  for (let i = 1; i < N; i++) {
+    const sameScene = shotById.get(clips[i]!.shotId)?.sceneId === shotById.get(clips[i - 1]!.shotId)?.sceneId;
+    const base = sameScene ? SLEEP_CROSSFADE_DURATION : SLEEP_SCENE_CROSSFADE_DURATION;
+    overlaps[i] = Math.max(0, Math.min(base, 0.4 * Math.min(D[i - 1]!, D[i]!)));
+  }
+
+  // clipLen[i] = visible narration time + the overlap it lends to the next clip.
+  const clipLen = D.map((d, i) => (i < N - 1 ? d + overlaps[i + 1]! : d));
+
+  // Resolve + prefetch each clip's source asset (deduped by R2 key).
+  const sourceKeys = clips.map((c) => {
+    const a = assetById.get(c.videoAssetId);
+    if (!a) throw new Error(`sleep render: clip ${c.shotId} missing video asset ${c.videoAssetId}`);
+    return a.r2Key;
+  });
+  const localByKey = new Map<string, string>();
+  const dlStart = Date.now();
+  await mapLimit(Array.from(new Set(sourceKeys)), DOWNLOAD_CONCURRENCY, async (key) => {
+    localByKey.set(key, await localFor(key));
+  });
+  log.info(
+    { projectId, assets: localByKey.size, tookMs: Date.now() - dlStart },
+    '[composite] sleep assets prefetched',
+  );
+
+  const sleepClips: SleepClip[] = clips.map((c, i) => ({
+    sourcePath: localByKey.get(sourceKeys[i]!)!,
+    targetDurationS: clipLen[i]!,
+    crossfadeInS: overlaps[i]!,
+    transition: sleepTransition(c.transitionIn),
+    index: i,
+  }));
+
+  log.info(
+    {
+      projectId,
+      clips: N,
+      crossfadeS: SLEEP_CROSSFADE_DURATION,
+      sceneCrossfadeS: SLEEP_SCENE_CROSSFADE_DURATION,
+      maxZoom: SLEEP_KENBURNS_MAX_ZOOM,
+      totalDurS: tl.totalDurationS,
+    },
+    '[composite] building sleep crossfade master',
+  );
+
+  await buildSleepMaster({
+    clips: sleepClips,
+    outPath: args.outPath,
+    width: args.width,
+    height: args.height,
+    fps: args.fps,
+    nvenc: NVENC,
+    maxZoom: SLEEP_KENBURNS_MAX_ZOOM,
+    workDir: path.join(WORK_DIR, projectId, 'sleep'),
+    concurrency: MIX_CONCURRENCY,
+  });
+}
+
 async function runComposite(projectId: string) {
   const t0 = Date.now();
   log.info({ projectId }, '[composite] start');
@@ -124,10 +244,36 @@ async function runComposite(projectId: string) {
         targetRes: project.targetRes,
         fps: project.targetFps,
         nvenc: NVENC,
+        sleep: SLEEP_RENDER,
         shotConcurrency: SHOT_CONCURRENCY,
       },
       '[composite] compositing shots',
     );
+
+    // Sleep-story path: cross-dissolve every clip into the next (no hard cuts),
+    // hold short clips with frozen Ken Burns tails, keep narration authoritative.
+    if (SLEEP_RENDER) {
+      const masterPath = path.join(WORK_DIR, projectId, 'composited_master.mp4');
+      await mkdir(path.dirname(masterPath), { recursive: true });
+      await renderSleepMaster({
+        projectId,
+        tl,
+        shotById,
+        assetById,
+        outPath: masterPath,
+        width: w,
+        height: h,
+        fps: project.targetFps,
+      });
+      await projectsRepo.setStatus(projectId, 'composited');
+      await eventsRepo.emit(projectId, 'composite', 'render_succeeded', {
+        masterPath,
+        totalMs: Date.now() - t0,
+        shots: tl.clips.length,
+      });
+      log.info({ projectId, totalMs: Date.now() - t0 }, '[composite] done (sleep)');
+      return masterPath;
+    }
 
     // Resolve each clip's shot/asset rows up front so the workers below only do
     // I/O + FFmpeg, not map lookups.

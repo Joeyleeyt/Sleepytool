@@ -1,7 +1,7 @@
-import { and, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import type { AssetKind } from '@emberforge/core';
 import { db } from '../client.js';
-import { assets } from '../schema/index.js';
+import { assets, scenes, shots } from '../schema/index.js';
 
 export const assetsRepo = {
   async create(row: typeof assets.$inferInsert) {
@@ -11,6 +11,27 @@ export const assetsRepo = {
 
   async findByProject(projectId: string) {
     return db.select().from(assets).where(eq(assets.projectId, projectId));
+  },
+
+  /**
+   * Live assets for a project, sorted in shot-plan order: scene order first,
+   * then shot-within-scene order (see shotsRepo.findByProject for why both keys
+   * are needed). The inner joins to `shots`/`scenes` drop assets whose `shotId`
+   * is null — i.e. project-level or orphaned assets left behind when a shot was
+   * deleted (assets.shot_id is ON DELETE SET NULL) — so only assets still bound
+   * to a live shot come back. Use this for a flat, ordered manifest/export; the
+   * render pipeline doesn't need it (buildTimeline already walks shots in plan
+   * order and looks assets up by shot id).
+   */
+  async findByProjectInPlanOrder(projectId: string) {
+    const rows = await db
+      .select({ asset: assets })
+      .from(assets)
+      .innerJoin(shots, eq(assets.shotId, shots.id))
+      .innerJoin(scenes, eq(shots.sceneId, scenes.id))
+      .where(eq(assets.projectId, projectId))
+      .orderBy(asc(scenes.ordinal), asc(shots.ordinal));
+    return rows.map((r) => r.asset);
   },
 
   async findByShotKind(shotId: string, kind: AssetKind) {
