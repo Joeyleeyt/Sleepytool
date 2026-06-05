@@ -85,6 +85,16 @@ interface JobStatusResp {
     height?: number;
     durationSeconds?: number;
   };
+  // Failure detail when status is FAILED/CENSORED. 69labs hasn't documented a
+  // single field name and has used several over time, so we probe them all in
+  // `failureDetail()` rather than rely on one. `error` is sometimes a string,
+  // sometimes an object with a nested `.message`.
+  error?: string | { message?: string; code?: string | number };
+  errorMessage?: string;
+  failureReason?: string;
+  message?: string;
+  reason?: string;
+  detail?: string;
   // TTS-specific
   chunksTotal?: number;
   chunksCompleted?: number;
@@ -110,6 +120,28 @@ function parseRetryAfter(res: Response): number | undefined {
   return undefined;
 }
 
+// First non-empty string among the given candidates. Handles the common
+// provider shapes where a field is either a plain string ("Insufficient
+// credits") or an object carrying a nested `.message`. Used to dig the
+// human-readable reason out of 69labs failure payloads and JSON error bodies.
+function firstString(...vals: unknown[]): string | undefined {
+  for (const v of vals) {
+    if (typeof v === 'string' && v.trim()) return v.trim();
+    if (v && typeof v === 'object') {
+      const m = (v as { message?: unknown }).message;
+      if (typeof m === 'string' && m.trim()) return m.trim();
+    }
+  }
+  return undefined;
+}
+
+// Pull the reason 69labs gives for a FAILED/CENSORED job out of the status
+// payload so it reaches the operator instead of a bare "FAILED". The field name
+// is undocumented and has varied, so probe every shape we've seen.
+function failureDetail(s: JobStatusResp): string | undefined {
+  return firstString(s.error, s.errorMessage, s.failureReason, s.message, s.reason, s.detail);
+}
+
 // Error responses from the edge (Cloudflare 5xx, nginx 502) are full HTML
 // pages — dumping them verbatim into an Error message floods the worker logs
 // with hundreds of unreadable lines. Collapse an HTML body to just its <title>
@@ -120,6 +152,18 @@ function summarizeBody(text: string, max = 300): string {
   if (/^<(?:!doctype|html|\?xml)/i.test(trimmed)) {
     const title = trimmed.match(/<title>([^<]*)<\/title>/i)?.[1]?.trim();
     return title ? `<html: ${title}>` : '<html error page>';
+  }
+  // JSON error bodies: surface the human-readable field (e.g. "Insufficient
+  // credits") rather than the raw object, so the operator sees the reason and
+  // not {"error":{"message":"…","code":402}}.
+  if (/^[[{]/.test(trimmed)) {
+    try {
+      const j = JSON.parse(trimmed) as Record<string, unknown>;
+      const msg = firstString(j.error, j.errorMessage, j.message, j.detail, j.reason);
+      if (msg) return msg.length > max ? `${msg.slice(0, max)}…` : msg;
+    } catch {
+      // Leading [ or { but not valid JSON — fall through to raw truncation.
+    }
   }
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
 }
@@ -205,10 +249,16 @@ async function pollUntilDone(
 
     if (s.status === 'COMPLETED') return s;
     if (s.status === 'FAILED' || s.status === 'CANCELLED') {
-      throw new Error(`69labs job ${s.id} ${s.status}`);
+      // Attach 69labs' own reason so the operator sees WHY it failed on the
+      // board/studio, not just the terminal state.
+      const detail = failureDetail(s);
+      throw new Error(`69labs job ${s.id} ${s.status}${detail ? `: ${detail}` : ''}`);
     }
     if (s.status === 'CENSORED') {
-      throw new Error(`69labs job ${s.id} CENSORED — manual rewrite required`);
+      const detail = failureDetail(s);
+      throw new Error(
+        `69labs job ${s.id} CENSORED${detail ? `: ${detail}` : ''} — manual rewrite required`,
+      );
     }
 
     // Flapping past the tolerance → it won't converge, fail fast (retriable).

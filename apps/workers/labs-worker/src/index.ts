@@ -175,9 +175,17 @@ async function processShot(job: Job) {
     await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind });
     return { assetId: asset.id };
   } catch (err) {
-    phase('WORKER', 'failed', ` err=${(err as Error).message}`);
-    await generationsRepo.markFailed(generation.id, { message: (err as Error).message });
+    const message = (err as Error).message;
+    phase('WORKER', 'failed', ` err=${message}`);
+    await generationsRepo.markFailed(generation.id, { message });
     log.error({ shotId, err }, '69labs failed');
+    // Surface the 69labs failure to the browser: this worker runs on Fly.io so
+    // its logs never reach the operator's console. Emit a project event the web
+    // app polls (/events) and re-logs in the browser console. Best-effort — a
+    // failed emit must not mask the original generation error.
+    await eventsRepo
+      .emit(projectId, 'labs', 'failed', { shotId, kind, message, providerJobId })
+      .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/failed event'));
     throw err;
   } finally {
     // labs69.image/video already cancels the provider job(s) on failure, so by
