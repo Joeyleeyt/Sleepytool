@@ -9,6 +9,7 @@ export * from './assets.js';
 export * from './timelines.js';
 export * from './renders.js';
 export * from './jobs.js';
+export * from './apiKeys.js';
 export * from './retries.js';
 export * from './visualMemory.js';
 export * from './events.js';

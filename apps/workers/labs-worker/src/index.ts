@@ -5,7 +5,7 @@ import { Worker, type Job } from 'bullmq';
 import pino from 'pino';
 import { acquire, acquireSlot, connection } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
-import { labs69 } from '@emberforge/ai-clients';
+import { labs69, withProviderKey } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
 
 const log = pino({ name: 'labs-worker' });
@@ -116,9 +116,16 @@ async function processShot(job: Job) {
     const t0 = Date.now();
 
     phase('WORKER', 'submitting');
-    const result =
+    // Pick a healthy 69labs key from the pool and run the whole
+    // submit→poll→download under it. On a key-attributable failure (bad key,
+    // 402 no-credits, 429) withProviderKey rotates to another key and re-runs
+    // this whole function — a fresh job under the new account — instead of
+    // failing the shot. Content failures (CENSORED) are rethrown immediately so
+    // we don't burn the pool on a doomed prompt. The provider job id changes on
+    // a rotation; onSubmit/onJobId keep our tracking pointed at the live job.
+    const result = await withProviderKey('69labs', (apiKey) =>
       kind === 'image'
-        ? await labs69.image({
+        ? labs69.image({
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
             onStatus,
@@ -130,8 +137,9 @@ async function processShot(job: Job) {
             resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
             onSubmit,
             onJobId,
+            apiKey,
           })
-        : await labs69.video({
+        : labs69.video({
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
             durationS: Number(shot.durationS),
@@ -142,7 +150,12 @@ async function processShot(job: Job) {
             onSubmit,
             onJobId,
             onStatus,
-          });
+            apiKey,
+          }),
+      // Until the api_keys table is populated, fall back to the legacy env key
+      // so labs jobs keep working exactly as before (safe incremental rollout).
+      { fallbackKey: process.env.LABS69_API_KEY },
+    );
 
     // Back in the worker: COMPLETED at 69labs, now pulling + storing the bytes.
     phase('WORKER', 'downloading');

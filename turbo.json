@@ -42,7 +42,8 @@
     "FFMPEG_X264_CRF",
     "FFMPEG_NVENC_PRESET",
     "FFMPEG_NVENC_CQ",
-    "FX_LIBRARY_DIR"
+    "FX_LIBRARY_DIR",
+    "API_KEY_ENCRYPTION_SECRET"
   ],
   "tasks": {
     "build": {

@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Library, ListChecks, Palette, Settings, HelpCircle, CircleUser, Flame } from 'lucide-react';
+import { Home, Library, ListChecks, Palette, KeyRound, Settings, HelpCircle, CircleUser, Flame } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Item {
@@ -17,6 +17,7 @@ const TOP: Item[] = [
   { href: '/library', icon: Library, label: 'Library' },
   { href: '/queue', icon: ListChecks, label: 'Render Queue' },
   { href: '/style-presets', icon: Palette, label: 'Presets' },
+  { href: '/keys', icon: KeyRound, label: 'API Keys' },
 ];
 const BOTTOM: Item[] = [
   { href: '/settings', icon: Settings, label: 'Settings' },

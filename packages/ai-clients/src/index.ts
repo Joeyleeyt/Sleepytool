@@ -1,6 +1,7 @@
 export * from './retry.js';
 export * from './veo3.js';
 export * from './labs69.js';
+export * from './keyManager.js';
 // Re-export Claude surface area EXCEPT `structured` — the local `structured`
 // below routes between Claude and OpenAI based on LLM_PROVIDER.
 export { claude, MODELS, type ModelKey } from './claude.js';

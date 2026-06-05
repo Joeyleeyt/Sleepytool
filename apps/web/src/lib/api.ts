@@ -174,7 +174,36 @@ export const api = {
 
   updatePrompt: (id: string, patch: { promptText?: string; negative?: string | null }) =>
     http<ShotPrompt>(`/v1/prompts/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  // ----- 69labs API key pool -----
+  listKeys: () => http<{ keys: ApiKey[] }>('/v1/keys'),
+
+  addKey: (input: { apiKey: string; label?: string }) =>
+    http<{ id: string; fingerprint: string }>('/v1/keys', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  setKeyActive: (id: string, active: boolean) =>
+    http<{ ok: boolean }>(`/v1/keys/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ action: active ? 'enable' : 'disable' }),
+    }),
+
+  deleteKey: (id: string) => http<{ ok: boolean }>(`/v1/keys/${id}`, { method: 'DELETE' }),
 };
+
+export interface ApiKey {
+  id: string;
+  provider: string;
+  label: string | null;
+  keyFingerprint: string;
+  isActive: boolean;
+  disabledReason: string | null;
+  lastUsedAt: string | null;
+  lastError: { message?: string; status?: number } | null;
+  createdAt: string;
+}
 
 export interface ShotPrompt {
   id: string;

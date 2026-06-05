@@ -29,7 +29,19 @@ setGlobalDispatcher(
   }),
 );
 
-const AUTH = () => ({ Authorization: `Bearer ${KEY}` });
+/**
+ * Per-call request context. Lets the caller (the key manager) supply the API
+ * key and base URL for a single generation so multiple keys can be rotated
+ * without redeploying. Both fall back to the module-level env defaults, so
+ * existing callers that pass nothing keep working unchanged.
+ */
+export interface Labs69Ctx {
+  apiKey?: string;
+  baseUrl?: string;
+}
+
+const AUTH = (ctx?: Labs69Ctx) => ({ Authorization: `Bearer ${ctx?.apiKey ?? KEY}` });
+const baseUrl = (ctx?: Labs69Ctx) => ctx?.baseUrl ?? BASE;
 
 // Per docs, recommended polling intervals: TTS 2-5s, images 3-5s, videos 5-10s.
 const POLL_INTERVAL_MS = 3_000;            // default (image / TTS)
@@ -95,6 +107,10 @@ interface JobStatusResp {
   message?: string;
   reason?: string;
   detail?: string;
+  // The field 69labs actually populates on a FAILED/CENSORED video job — a
+  // human-readable, end-user-facing reason (e.g. the celebrity/likeness block).
+  // Listed first in failureDetail() since it's the most reliable in practice.
+  userMessage?: string;
   // TTS-specific
   chunksTotal?: number;
   chunksCompleted?: number;
@@ -139,7 +155,15 @@ function firstString(...vals: unknown[]): string | undefined {
 // payload so it reaches the operator instead of a bare "FAILED". The field name
 // is undocumented and has varied, so probe every shape we've seen.
 function failureDetail(s: JobStatusResp): string | undefined {
-  return firstString(s.error, s.errorMessage, s.failureReason, s.message, s.reason, s.detail);
+  return firstString(
+    s.userMessage,
+    s.error,
+    s.errorMessage,
+    s.failureReason,
+    s.message,
+    s.reason,
+    s.detail,
+  );
 }
 
 // Error responses from the edge (Cloudflare 5xx, nginx 502) are full HTML
@@ -159,7 +183,7 @@ function summarizeBody(text: string, max = 300): string {
   if (/^[[{]/.test(trimmed)) {
     try {
       const j = JSON.parse(trimmed) as Record<string, unknown>;
-      const msg = firstString(j.error, j.errorMessage, j.message, j.detail, j.reason);
+      const msg = firstString(j.userMessage, j.error, j.errorMessage, j.message, j.detail, j.reason);
       if (msg) return msg.length > max ? `${msg.slice(0, max)}…` : msg;
     } catch {
       // Leading [ or { but not valid JSON — fall through to raw truncation.
@@ -176,11 +200,11 @@ async function httpError(path: string, res: Response): Promise<Error> {
   });
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, ctx?: Labs69Ctx): Promise<T> {
   return withRetry(async () => {
-    const res = await fetch(`${BASE}${path}`, {
+    const res = await fetch(`${baseUrl(ctx)}${path}`, {
       method: 'POST',
-      headers: { ...AUTH(), 'content-type': 'application/json' },
+      headers: { ...AUTH(ctx), 'content-type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (!res.ok) throw await httpError(path, res);
@@ -188,9 +212,9 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
-async function getJson<T>(path: string): Promise<T> {
+async function getJson<T>(path: string, ctx?: Labs69Ctx): Promise<T> {
   return withRetry(async () => {
-    const res = await fetch(`${BASE}${path}`, { headers: AUTH() });
+    const res = await fetch(`${baseUrl(ctx)}${path}`, { headers: AUTH(ctx) });
     if (!res.ok) throw await httpError(path, res);
     return (await res.json()) as T;
   });
@@ -210,6 +234,7 @@ async function pollUntilDone(
   intervalMs: number = POLL_INTERVAL_MS,
   onStatus?: (status: JobStatus, jobId?: string) => void,
   onJobId?: (jobId: string) => void,
+  ctx?: Labs69Ctx,
 ): Promise<JobStatusResp> {
   let deadline = Date.now() + POLL_TIMEOUT_MS;
   let last: JobStatus | undefined;
@@ -218,7 +243,7 @@ async function pollUntilDone(
   let restarts = 0;
   let graceApplied = false;
   while (Date.now() < deadline) {
-    const s = await getJson<JobStatusResp>(statusPath);
+    const s = await getJson<JobStatusResp>(statusPath, ctx);
 
     // Surface each new underlying job id so the caller can cancel the live one.
     if (s.id && s.id !== lastId) onJobId?.(s.id);
@@ -282,10 +307,10 @@ async function pollUntilDone(
  * We pass redirect: 'manual' so we can read the Location header without
  * also fetching the file bytes here.
  */
-async function resolveDownloadUrl(downloadPath: string): Promise<string> {
-  const res = await fetch(`${BASE}${downloadPath}`, {
+async function resolveDownloadUrl(downloadPath: string, ctx?: Labs69Ctx): Promise<string> {
+  const res = await fetch(`${baseUrl(ctx)}${downloadPath}`, {
     method: 'GET',
-    headers: AUTH(),
+    headers: AUTH(ctx),
     redirect: 'manual',
   });
   const location = res.headers.get('location');
@@ -301,8 +326,10 @@ async function resolveDownloadUrl(downloadPath: string): Promise<string> {
  * Best-effort: a job that already reached a terminal state returns 404/400,
  * which we swallow. `kind` is the URL segment ('images' | 'videos').
  */
-async function cancelJob(kind: string, id: string): Promise<void> {
-  await fetch(`${BASE}/${kind}/cancel/${id}`, { method: 'POST', headers: AUTH() }).catch(() => {});
+async function cancelJob(kind: string, id: string, ctx?: Labs69Ctx): Promise<void> {
+  await fetch(`${baseUrl(ctx)}/${kind}/cancel/${id}`, { method: 'POST', headers: AUTH(ctx) }).catch(
+    () => {},
+  );
 }
 
 // ============ TTS ============
@@ -314,6 +341,8 @@ export interface TtsInput {
   voiceProvider?: 'elevenlabs' | 'edgetts' | 'minimax';
   modelId?: string;
   pace?: 'slow' | 'medium' | 'fast'; // mapped to voiceSettings.speed
+  apiKey?: string;
+  baseUrl?: string;
 }
 
 const PACE_TO_SPEED: Record<'slow' | 'medium' | 'fast', number> = {
@@ -329,15 +358,16 @@ export const labs69 = {
     const voiceId = input.voiceId ?? input.voice ?? DEFAULT_VOICE;
     if (!voiceId) throw new Error('labs69.tts: no voiceId (set LABS69_VOICE_ID)');
 
+    const ctx: Labs69Ctx = { apiKey: input.apiKey, baseUrl: input.baseUrl };
     const create = await postJson<JobCreate>('/tts/generate', {
       text: input.text,
       voiceId,
       voiceProvider: input.voiceProvider ?? 'elevenlabs',
       modelId: input.modelId,
       voiceSettings: input.pace ? { speed: PACE_TO_SPEED[input.pace] } : undefined,
-    });
-    const done = await pollUntilDone(`/tts/status/${create.id}`);
-    const url = await resolveDownloadUrl(`/tts/download/${create.id}`);
+    }, ctx);
+    const done = await pollUntilDone(`/tts/status/${create.id}`, POLL_INTERVAL_MS, undefined, undefined, ctx);
+    const url = await resolveDownloadUrl(`/tts/download/${create.id}`, ctx);
     return {
       url,
       providerJobId: create.id,
@@ -365,7 +395,13 @@ export const labs69 = {
     // Called on each 69labs status transition (PENDING→PROCESSING→…) with the
     // current job id, so the caller can show where the job is at the provider.
     onStatus?: (status: JobStatus, jobId?: string) => void;
+    // The API key + base URL to use for THIS generation. Supplied by the key
+    // manager so a single submit→poll→download runs entirely under one account.
+    // Omit to fall back to the LABS69_API_KEY / LABS69_BASE_URL env defaults.
+    apiKey?: string;
+    baseUrl?: string;
   }): Promise<BaseResult> {
+    const ctx: Labs69Ctx = { apiKey: input.apiKey, baseUrl: input.baseUrl };
     const create = await postJson<JobCreate>('/images/generate', {
       prompt: input.prompt,
       model: input.model,
@@ -373,7 +409,7 @@ export const labs69 = {
       resolution: input.resolution,
       seed: input.seed,
       imageUrls: input.imageUrls,
-    });
+    }, ctx);
     // Track every job id seen so failure-cancel hits the live job, not just the
     // original (a 69labs restart swaps the id and orphans the old slot).
     const seenIds = new Set<string>([create.id]);
@@ -387,8 +423,9 @@ export const labs69 = {
           seenIds.add(id);
           input.onJobId?.(id);
         },
+        ctx,
       );
-      const url = await resolveDownloadUrl(`/images/download/${create.id}`);
+      const url = await resolveDownloadUrl(`/images/download/${create.id}`, ctx);
       return {
         url,
         providerJobId: create.id,
@@ -402,7 +439,7 @@ export const labs69 = {
       // Poll timeout / restart-loop / download error / CENSORED: cancel every
       // id we saw so we don't leak a concurrency slot. (FAILED/CANCELLED are
       // already terminal — cancel is a harmless no-op there.)
-      await Promise.all([...seenIds].map((id) => cancelJob('images', id)));
+      await Promise.all([...seenIds].map((id) => cancelJob('images', id, ctx)));
       throw err;
     }
   },
@@ -420,7 +457,10 @@ export const labs69 = {
     onSubmit?: (jobId: string) => void | Promise<void>;
     onJobId?: (jobId: string) => void;
     onStatus?: (status: JobStatus, jobId?: string) => void;
+    apiKey?: string;
+    baseUrl?: string;
   }): Promise<BaseResult & { durationS: number }> {
+    const ctx: Labs69Ctx = { apiKey: input.apiKey, baseUrl: input.baseUrl };
     // 69labs `duration` field is a STRING like "5" / "10" — but their default
     // model (Veo 3.1 Lite) and several others reject it with 400
     // "does not support duration selection". Gate behind an env so we only
@@ -447,7 +487,7 @@ export const labs69 = {
       mode: input.mode,
       imageUrls: input.imageUrls,
       mute: input.mute,
-    });
+    }, ctx);
     const seenIds = new Set<string>([create.id]);
     await input.onSubmit?.(create.id);
     try {
@@ -459,8 +499,9 @@ export const labs69 = {
           seenIds.add(id);
           input.onJobId?.(id);
         },
+        ctx,
       );
-      const url = await resolveDownloadUrl(`/videos/download/${create.id}`);
+      const url = await resolveDownloadUrl(`/videos/download/${create.id}`, ctx);
       return {
         url,
         providerJobId: create.id,
@@ -472,7 +513,7 @@ export const labs69 = {
         },
       };
     } catch (err) {
-      await Promise.all([...seenIds].map((id) => cancelJob('videos', id)));
+      await Promise.all([...seenIds].map((id) => cancelJob('videos', id, ctx)));
       throw err;
     }
   },
@@ -502,8 +543,12 @@ export const labs69 = {
    * `kind` is the URL segment: 'images' | 'videos' | 'motion-graphics'.
    * Used by scripts/reap-69labs-orphans.ts to clear leaked jobs.
    */
-  async cancel(kind: 'images' | 'videos' | 'motion-graphics', id: string): Promise<void> {
-    await cancelJob(kind, id);
+  async cancel(
+    kind: 'images' | 'videos' | 'motion-graphics',
+    id: string,
+    ctx?: Labs69Ctx,
+  ): Promise<void> {
+    await cancelJob(kind, id, ctx);
   },
 
   async listImageModels() {
