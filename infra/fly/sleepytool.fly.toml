@@ -17,6 +17,15 @@ primary_region = 'lhr'
   NVENC_ENABLED = 'false'
   RENDER_WORK_DIR = '/data/emberforge'
 
+  # --- Sleep-story renderer (render process) ---
+  # Every clip cross-dissolves into the next (no hard cuts), short clips hold a
+  # frozen slow-Ken-Burns last frame, narration stays authoritative. Set
+  # SLEEP_RENDER='false' to fall back to the legacy hard-cut concat path.
+  SLEEP_RENDER = 'true'
+  SLEEP_CROSSFADE_DURATION = '2.0'          # dissolve within a scene (s)
+  SLEEP_SCENE_CROSSFADE_DURATION = '2.0'    # dissolve across scene boundaries (s)
+  SLEEP_KENBURNS_MAX_ZOOM = '1.02'          # 2% push over a clip (imperceptible)
+
 # Two process groups → two machines.
 #   workers — orchestrator + 69labs (labs/tts) + veo3 in ONE Node process.
 #             All four are I/O-bound BullMQ consumers (they wait on external
