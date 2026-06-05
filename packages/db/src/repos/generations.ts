@@ -146,4 +146,38 @@ export const generationsRepo = {
       .set({ status: 'failed' as GenStatus, error: error as object, finishedAt: new Date() })
       .where(eq(generations.id, id));
   },
+
+  /**
+   * Supersede a shot's stale `failed` generations for the given providers by
+   * marking them `cancelled`. Called by the per-shot retry endpoint after it
+   * re-enqueues a leg: /scenes derives "failed" from the latest failed
+   * generation, so without this the shot would stay stuck on the failed pill
+   * even though a fresh job is queued. Cancelling (rather than deleting) keeps
+   * the error row for diagnostics while excluding it from `findFailedByProject`,
+   * letting the shot read as queued/in_labs like any other generating shot.
+   */
+  async supersedeFailedForShot(shotId: string, providers: string[]) {
+    if (providers.length === 0) return;
+    const rows = await db
+      .select({ id: generations.id })
+      .from(generations)
+      .innerJoin(prompts, eq(prompts.id, generations.promptId))
+      .where(
+        and(
+          eq(prompts.shotId, shotId),
+          eq(generations.status, 'failed' as GenStatus),
+          inArray(generations.provider, providers),
+        ),
+      );
+    if (rows.length === 0) return;
+    await db
+      .update(generations)
+      .set({ status: 'cancelled' as GenStatus })
+      .where(
+        inArray(
+          generations.id,
+          rows.map((r) => r.id),
+        ),
+      );
+  },
 };

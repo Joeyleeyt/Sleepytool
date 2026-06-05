@@ -31,6 +31,20 @@ const OPTS: Record<QueueName, JobsOptions | undefined> = {
   orchestrator: undefined,
 };
 
+/**
+ * The default job options for a queue (attempts + backoff). Exported so callers
+ * that enqueue a queue's jobs through a `FlowProducer` can apply them per child:
+ * BullMQ only applies `defaultJobOptions` to jobs added via `Queue.add`, NOT to
+ * flow children, which otherwise run with `attempts: 1` (no retry). The fan-out
+ * in generateAssets.ts uses this so an initial 69labs/veo3 FAILED is retried
+ * with the same backoff as the per-shot retry path. Returns a fresh object so a
+ * caller can spread extra fields without mutating the shared default.
+ */
+export function jobOptionsFor(name: QueueName): JobsOptions | undefined {
+  const o = OPTS[name];
+  return o ? { ...o } : undefined;
+}
+
 // Lazy queue cache. `new Queue(...)` opens a Redis connection — defer it
 // until the first time a queue is actually used so module loading stays
 // side-effect free. Critical for Next.js Route Handlers / Vercel where

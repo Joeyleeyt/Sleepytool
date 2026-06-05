@@ -107,18 +107,22 @@ export async function GET(_request: Request, { params }: { params: { id: string 
         const narration = a.find((x) => x.kind === 'audio_narration') ?? null;
         const p = visualPromptByShot.get(shot.id) ?? null;
         const failure = failuresByShot.get(shot.id) ?? null;
-        // A leg is "failed" iff there's a recorded failure AND no asset has
-        // landed for it yet. If a retry succeeded later, the asset row covers
-        // the old failure and we treat the shot as ready/partial.
-        const visualFailed = !!failure?.visual && !visual;
-        const narrationFailed = !!failure?.narration && !narration;
+        const active = activeByShot.get(shot.id) ?? null;
+        // A leg is "failed" iff there's a recorded failure, no asset has landed
+        // for it yet, AND there's no fresh attempt already in flight. The last
+        // clause matters because a failure row is never deleted: when a job is
+        // retried (BullMQ auto-retry on its attempts budget, or the per-shot
+        // Retry button) a new queued/running generation supersedes the old
+        // failure, so the shot should read as queued/in_labs — not stay pinned
+        // on the failed pill while it's actually regenerating.
+        const visualFailed = !!failure?.visual && !visual && !active?.visual;
+        const narrationFailed = !!failure?.narration && !narration && !active?.narration;
         const baseStatus =
           visual && narration ? 'ready' : visual || narration ? 'partial' : 'pending';
         const status =
           visualFailed || narrationFailed ? 'failed' : baseStatus;
         // Per-leg generation phase, surfaced so the card can distinguish a shot
         // waiting in the worker queue from one already rendering on 69labs.
-        const active = activeByShot.get(shot.id) ?? null;
         const legPhase = (
           asset: unknown,
           failed: boolean,

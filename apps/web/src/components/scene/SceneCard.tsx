@@ -14,6 +14,8 @@ import {
   RefreshCw,
   Loader2,
   Cloud,
+  AlertTriangle,
+  Pencil,
 } from 'lucide-react';
 import { Badge } from '@/components/primitives/Badge';
 import { cn } from '@/lib/utils';
@@ -61,6 +63,16 @@ export function SceneCard({
     shot.failures.visual ? ('visual' as const) : null,
     shot.failures.narration ? ('narration' as const) : null,
   ].filter((x): x is 'visual' | 'narration' => x !== null);
+
+  // Human-readable failure reason(s), prefixed by the leg that failed so a
+  // mixed failure ("visual: … / narration: …") is unambiguous. Used both as a
+  // short on-card label and the full tooltip on the retry control.
+  const failureReason = [
+    shot.failures.visual ? `visual: ${shot.failures.visual.message}` : null,
+    shot.failures.narration ? `narration: ${shot.failures.narration.message}` : null,
+  ]
+    .filter(Boolean)
+    .join('  /  ');
 
   const retry = useMutation({
     mutationFn: () => api.retryShot(shot.id, failedLegs.length ? failedLegs : undefined),
@@ -263,26 +275,65 @@ export function SceneCard({
 
             {/* Failed shots stay visually identical to generating ones; a
                 subtle, neutral retry control surfaces only on hover so the
-                shot can still be re-run. */}
+                shot can still be re-run. The reason the generation failed is
+                shown as a small pill (top-left) plus the full message on the
+                retry control's tooltip, so the operator knows WHY before
+                re-running. */}
             {isFailed && (
-              <button
-                type="button"
-                aria-label="Retry"
-                title={retry.error ? (retry.error as Error).message : 'Retry generation'}
-                disabled={retry.isPending}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  retry.mutate();
-                }}
-                className={cn(
-                  'absolute inset-0 grid place-items-center transition-opacity z-10 disabled:cursor-wait',
-                  retry.isPending || hovered ? 'opacity-100' : 'opacity-0',
+              <>
+                {failureReason && (
+                  // Purely visual — pointer-events-none so clicks/hover fall
+                  // through to the full-card retry button beneath (which carries
+                  // the full untruncated message in its tooltip).
+                  <span className="pointer-events-none absolute top-2 left-2 z-20 max-w-[calc(100%-2.5rem)] inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-bad/20 text-bad backdrop-blur-sm">
+                    <AlertTriangle size={11} className="shrink-0" />
+                    <span className="truncate">{failureReason}</span>
+                  </span>
                 )}
-              >
-                <span className="grid place-items-center w-11 h-11 rounded-full bg-black/55 backdrop-blur-sm text-white shadow-lg transition-transform group-hover:scale-105">
-                  <RefreshCw size={18} className={retry.isPending ? 'animate-spin' : ''} />
-                </span>
-              </button>
+                {/* Edit-prompt entry — opens Studio so the operator can rework
+                    the prompt and re-send to 69labs, distinct from the quick
+                    same-prompt retry (full-card button below). z-30 + real
+                    pointer events so it isn't swallowed by the retry overlay. */}
+                <button
+                  type="button"
+                  aria-label="Edit prompt"
+                  title="Edit prompt & re-send to 69labs"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenStudio?.(shot.id);
+                  }}
+                  className={cn(
+                    'absolute top-2 right-2 z-30 grid place-items-center w-7 h-7 rounded-full bg-black/55 backdrop-blur-sm text-white/90 shadow transition-opacity hover:bg-black/75',
+                    hovered ? 'opacity-100' : 'opacity-0',
+                  )}
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Retry"
+                  title={
+                    retry.error
+                      ? (retry.error as Error).message
+                      : failureReason
+                        ? `${failureReason}\n\nClick to retry`
+                        : 'Retry generation'
+                  }
+                  disabled={retry.isPending}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    retry.mutate();
+                  }}
+                  className={cn(
+                    'absolute inset-0 grid place-items-center transition-opacity z-10 disabled:cursor-wait',
+                    retry.isPending || hovered ? 'opacity-100' : 'opacity-0',
+                  )}
+                >
+                  <span className="grid place-items-center w-11 h-11 rounded-full bg-black/55 backdrop-blur-sm text-white shadow-lg transition-transform group-hover:scale-105">
+                    <RefreshCw size={18} className={retry.isPending ? 'animate-spin' : ''} />
+                  </span>
+                </button>
+              </>
             )}
           </>
         )}

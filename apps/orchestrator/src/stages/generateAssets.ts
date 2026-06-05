@@ -1,5 +1,5 @@
-import { FlowProducer, QueueEvents } from 'bullmq';
-import { connection } from '@emberforge/queue';
+import { FlowProducer, QueueEvents, type JobsOptions } from 'bullmq';
+import { connection, jobOptionsFor, type QueueName } from '@emberforge/queue';
 import { eventsRepo, projectsRepo, shotsRepo } from '@emberforge/db';
 
 const flow = new FlowProducer({ connection });
@@ -28,12 +28,15 @@ export async function generateAssetsStage(projectId: string) {
   const shots = await shotsRepo.findByProject(projectId);
   if (shots.length === 0) throw new Error(`project ${projectId} has no shots to generate`);
 
-  const children: { name: string; queueName: string; data: unknown }[] = [];
+  const children: { name: string; queueName: string; data: unknown; opts?: JobsOptions }[] = [];
 
   // Track what we fanned out, broken down by queue, so we can both log a
   // per-shot trail and emit a summary of "how many of each / which provider".
+  // `opts` carries the queue's attempts/backoff: FlowProducer children do NOT
+  // inherit a queue's defaultJobOptions, so without this each asset job would
+  // run with attempts:1 and a single 69labs/veo3 FAILED would never be retried.
   const enqueue = (queueName: string, data: unknown, asset: string, shotId: string) => {
-    children.push({ name: queueName, queueName, data });
+    children.push({ name: queueName, queueName, data, opts: jobOptionsFor(queueName as QueueName) });
     console.log(
       `[generateAssets] enqueued ${asset.padEnd(11)} -> ${queueName.padEnd(10)} (${QUEUE_PROVIDER[queueName]})  shot=${shotId}`,
     );

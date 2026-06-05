@@ -36,6 +36,26 @@ const POLL_INTERVAL_MS = 3_000;            // default (image / TTS)
 const VIDEO_POLL_INTERVAL_MS = 6_000;      // per docs recommendation
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;    // 10 min hard ceiling
 
+// Restart-loop guard. 69labs sometimes re-queues a generation on its own side:
+// the status URL we keep polling regresses (e.g. PROCESSING → PENDING) and the
+// underlying job id changes. Such a job rarely converges, yet without a guard we
+// hold a provider concurrency slot until the full POLL_TIMEOUT_MS ceiling.
+//   • after the FIRST restart we shrink the remaining window to RESTART_GRACE_MS
+//     so a post-restart hang bails in minutes, not 10 min;
+//   • after MAX_PROVIDER_RESTARTS restarts we bail immediately (it's flapping).
+const RESTART_GRACE_MS = Number(process.env.LABS69_RESTART_GRACE_MS ?? 3 * 60 * 1000);
+const MAX_PROVIDER_RESTARTS = Math.max(1, Number(process.env.LABS69_MAX_RESTARTS ?? 2));
+
+// Monotonic progression of a healthy job. A status whose rank is BELOW one the
+// job already reached means 69labs restarted it. Unknown statuses rank -1 and
+// never trigger the regression check on their own.
+const STATUS_RANK: Record<string, number> = {
+  PENDING: 0,
+  PROCESSING: 1,
+  FINALIZING: 2,
+  COMPLETED: 3,
+};
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 type JobStatus =
@@ -132,21 +152,57 @@ async function getJson<T>(path: string): Promise<T> {
   });
 }
 
-/** Poll job status until it leaves the in-flight set or the timeout fires. */
+/**
+ * Poll job status until it leaves the in-flight set or the timeout fires.
+ *
+ * `onJobId` fires for every DISTINCT provider job id the status endpoint
+ * reports — the first one plus any 69labs swaps in when it re-queues the
+ * generation. The caller uses it to cancel whichever id is actually live
+ * (cancelling the original `create.id` after a restart leaks a slot), and the
+ * worker uses it to keep its in-flight/cancel tracking pointed at the real job.
+ */
 async function pollUntilDone(
   statusPath: string,
   intervalMs: number = POLL_INTERVAL_MS,
-  onStatus?: (status: JobStatus) => void,
+  onStatus?: (status: JobStatus, jobId?: string) => void,
+  onJobId?: (jobId: string) => void,
 ): Promise<JobStatusResp> {
-  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let deadline = Date.now() + POLL_TIMEOUT_MS;
   let last: JobStatus | undefined;
+  let lastId: string | undefined;
+  let maxRank = -1;
+  let restarts = 0;
+  let graceApplied = false;
   while (Date.now() < deadline) {
     const s = await getJson<JobStatusResp>(statusPath);
+
+    // Surface each new underlying job id so the caller can cancel the live one.
+    if (s.id && s.id !== lastId) onJobId?.(s.id);
+
+    // Detect a 69labs-side restart: the job id changed mid-flight, or the
+    // status fell below a stage it had already reached. Either is abnormal and
+    // means the generation is looping rather than progressing.
+    const rank = STATUS_RANK[s.status] ?? -1;
+    const idChanged = !!lastId && !!s.id && s.id !== lastId;
+    const statusRegressed = rank >= 0 && rank < maxRank;
+    if (idChanged || statusRegressed) {
+      restarts++;
+      // First restart: shrink the remaining window so a post-restart hang
+      // doesn't sit on a concurrency slot for the full 10-min ceiling.
+      if (!graceApplied) {
+        graceApplied = true;
+        deadline = Math.min(deadline, Date.now() + RESTART_GRACE_MS);
+      }
+    }
+    lastId = s.id ?? lastId;
+    if (rank >= 0) maxRank = Math.max(maxRank, rank);
+
     // Notify only on transitions so the caller's log isn't spammed every poll.
     if (onStatus && s.status !== last) {
       last = s.status;
-      onStatus(s.status);
+      onStatus(s.status, s.id);
     }
+
     if (s.status === 'COMPLETED') return s;
     if (s.status === 'FAILED' || s.status === 'CANCELLED') {
       throw new Error(`69labs job ${s.id} ${s.status}`);
@@ -154,9 +210,21 @@ async function pollUntilDone(
     if (s.status === 'CENSORED') {
       throw new Error(`69labs job ${s.id} CENSORED — manual rewrite required`);
     }
+
+    // Flapping past the tolerance → it won't converge, fail fast (retriable).
+    if (restarts >= MAX_PROVIDER_RESTARTS) {
+      throw new Error(
+        `69labs kept restarting job ${s.id} (${restarts}×, status fell back to ${s.status}) — bailing before the ${POLL_TIMEOUT_MS / 1000}s ceiling`,
+      );
+    }
+
     await sleep(intervalMs);
   }
-  throw new Error(`69labs poll timed out after ${POLL_TIMEOUT_MS / 1000}s`);
+  throw new Error(
+    graceApplied
+      ? `69labs restarted job ${lastId ?? '?'} and it did not finish within ${RESTART_GRACE_MS / 1000}s of the restart`
+      : `69labs poll timed out after ${POLL_TIMEOUT_MS / 1000}s`,
+  );
 }
 
 /**
@@ -241,9 +309,12 @@ export const labs69 = {
     // long poll. Lets the worker persist the id so an in-flight job can be
     // cancelled/reaped if this process dies mid-poll.
     onSubmit?: (jobId: string) => void | Promise<void>;
-    // Called on each 69labs status transition (PENDING→PROCESSING→…) so the
-    // caller can show where the job is while it sits at the provider.
-    onStatus?: (status: JobStatus) => void;
+    // Called for every NEW provider job id seen while polling — i.e. the
+    // original, plus any id 69labs swaps in when it re-queues the generation.
+    onJobId?: (jobId: string) => void;
+    // Called on each 69labs status transition (PENDING→PROCESSING→…) with the
+    // current job id, so the caller can show where the job is at the provider.
+    onStatus?: (status: JobStatus, jobId?: string) => void;
   }): Promise<BaseResult> {
     const create = await postJson<JobCreate>('/images/generate', {
       prompt: input.prompt,
@@ -253,9 +324,20 @@ export const labs69 = {
       seed: input.seed,
       imageUrls: input.imageUrls,
     });
+    // Track every job id seen so failure-cancel hits the live job, not just the
+    // original (a 69labs restart swaps the id and orphans the old slot).
+    const seenIds = new Set<string>([create.id]);
     await input.onSubmit?.(create.id);
     try {
-      const done = await pollUntilDone(`/images/status/${create.id}`, POLL_INTERVAL_MS, input.onStatus);
+      const done = await pollUntilDone(
+        `/images/status/${create.id}`,
+        POLL_INTERVAL_MS,
+        input.onStatus,
+        (id) => {
+          seenIds.add(id);
+          input.onJobId?.(id);
+        },
+      );
       const url = await resolveDownloadUrl(`/images/download/${create.id}`);
       return {
         url,
@@ -267,10 +349,10 @@ export const labs69 = {
         },
       };
     } catch (err) {
-      // Poll timeout / download error / CENSORED: cancel so we don't leak a
-      // concurrency slot. (FAILED/CANCELLED are already terminal — cancel is a
-      // harmless no-op there.)
-      await cancelJob('images', create.id);
+      // Poll timeout / restart-loop / download error / CENSORED: cancel every
+      // id we saw so we don't leak a concurrency slot. (FAILED/CANCELLED are
+      // already terminal — cancel is a harmless no-op there.)
+      await Promise.all([...seenIds].map((id) => cancelJob('images', id)));
       throw err;
     }
   },
@@ -286,7 +368,8 @@ export const labs69 = {
     imageUrls?: string[];
     mute?: boolean;
     onSubmit?: (jobId: string) => void | Promise<void>;
-    onStatus?: (status: JobStatus) => void;
+    onJobId?: (jobId: string) => void;
+    onStatus?: (status: JobStatus, jobId?: string) => void;
   }): Promise<BaseResult & { durationS: number }> {
     // 69labs `duration` field is a STRING like "5" / "10" — but their default
     // model (Veo 3.1 Lite) and several others reject it with 400
@@ -315,9 +398,18 @@ export const labs69 = {
       imageUrls: input.imageUrls,
       mute: input.mute,
     });
+    const seenIds = new Set<string>([create.id]);
     await input.onSubmit?.(create.id);
     try {
-      const done = await pollUntilDone(`/videos/status/${create.id}`, VIDEO_POLL_INTERVAL_MS, input.onStatus);
+      const done = await pollUntilDone(
+        `/videos/status/${create.id}`,
+        VIDEO_POLL_INTERVAL_MS,
+        input.onStatus,
+        (id) => {
+          seenIds.add(id);
+          input.onJobId?.(id);
+        },
+      );
       const url = await resolveDownloadUrl(`/videos/download/${create.id}`);
       return {
         url,
@@ -330,7 +422,7 @@ export const labs69 = {
         },
       };
     } catch (err) {
-      await cancelJob('videos', create.id);
+      await Promise.all([...seenIds].map((id) => cancelJob('videos', id)));
       throw err;
     }
   },

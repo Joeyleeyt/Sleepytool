@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { X, Play, Sparkles, Film, Image as ImageIcon, Save, Loader2 } from 'lucide-react';
+import { X, Play, Sparkles, Film, Image as ImageIcon, Save, Loader2, Send, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
 import { api, type ShotPrompt } from '@/lib/api';
@@ -63,14 +63,62 @@ export default function StudioPage() {
     },
   });
 
+  // Current generation state for this shot, read from the scenes payload so the
+  // operator can see why a shot failed (and the live phase) right here in the
+  // editor instead of bouncing back to the board.
+  const isFailed = shot?.status === 'failed';
+  const visualPhase = shot?.progress.visual;
+  const isVisualGenerating = visualPhase === 'queued' || visualPhase === 'in_labs';
+  const failureReason = [
+    shot?.failures.visual ? `visual: ${shot.failures.visual.message}` : null,
+    shot?.failures.narration ? `narration: ${shot.failures.narration.message}` : null,
+  ]
+    .filter(Boolean)
+    .join('  /  ');
+
+  // Where the visual leg routes — "69labs" for the labs.* targets, otherwise the
+  // raw target (e.g. veo3) so the button label stays honest.
+  const target = visualPrompt?.target ?? '';
+  const targetLabel = target.startsWith('69labs') ? '69labs' : target || 'provider';
+
+  // Manual regenerate: persist any prompt edits FIRST so the worker reads the
+  // new text, then re-enqueue the visual leg. retryShot deletes the cached asset
+  // server-side (cache miss → fresh generation) and supersedes the stale failure
+  // so the card flips straight to Queued / On 69Labs.
+  const regenerate = useMutation({
+    mutationFn: async () => {
+      if (visualPrompt && dirty) {
+        await api.updatePrompt(visualPrompt.id, {
+          promptText: draft,
+          negative: negative.length > 0 ? negative : null,
+        });
+      }
+      return api.retryShot(shotId, ['visual']);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['shot-prompts', shotId] });
+      qc.invalidateQueries({ queryKey: ['scenes'] });
+      router.back();
+    },
+  });
+
   return (
     <div className="fixed inset-0 z-50 bg-black/70 grid place-items-center p-6" onClick={() => router.back()}>
       <div className="w-full max-w-5xl bg-bg-elev border border-border rounded-card overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <div className="p-4 border-b border-border flex items-center justify-between">
           <div className="min-w-0">
-            <h2 className="font-display text-sm font-semibold">
-              Scene {scene?.ordinal !== undefined ? scene.ordinal + 1 : '?'} · Shot {shot?.ordinal !== undefined ? shot.ordinal + 1 : '?'}
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="font-display text-sm font-semibold">
+                Scene {scene?.ordinal !== undefined ? scene.ordinal + 1 : '?'} · Shot {shot?.ordinal !== undefined ? shot.ordinal + 1 : '?'}
+              </h2>
+              {isFailed ? (
+                <Badge tone="bad">failed</Badge>
+              ) : isVisualGenerating ? (
+                <Badge tone="busy">{visualPhase === 'in_labs' ? 'on 69labs' : 'queued'}</Badge>
+              ) : shot?.status === 'ready' ? (
+                <Badge tone="ok">ready</Badge>
+              ) : null}
+            </div>
             <p className="mt-0.5 text-xs text-text-dim truncate max-w-2xl">{shot?.narrationText ?? ''}</p>
           </div>
           <button onClick={() => router.back()} className="text-text-dim hover:text-text">
@@ -106,6 +154,25 @@ export default function StudioPage() {
           </div>
 
           <div className="p-4 space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto">
+            {isFailed && failureReason && (
+              <div className="rounded-md border border-bad/30 bg-bad/10 p-3">
+                <div className="flex items-center gap-1.5 text-bad text-xs font-medium mb-1">
+                  <AlertTriangle size={13} />
+                  Generation failed
+                </div>
+                <p className="text-[11px] text-text-dim leading-snug break-words">{failureReason}</p>
+                <p className="text-[11px] text-text-faint mt-1.5 leading-snug">
+                  Edit the prompt below and re-send — a reworded prompt often clears a provider-side failure.
+                </p>
+              </div>
+            )}
+            {isVisualGenerating && (
+              <div className="rounded-md border border-busy/30 bg-busy/10 p-3 flex items-center gap-2 text-xs text-busy">
+                <Loader2 size={13} className="animate-spin" />
+                {visualPhase === 'in_labs' ? 'Rendering on 69labs…' : 'Queued for 69labs…'}
+              </div>
+            )}
+
             <section>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-xs uppercase tracking-wider text-text-faint">Prompt</h3>
@@ -140,20 +207,39 @@ export default function StudioPage() {
                     className="w-full bg-bg border border-border rounded-md px-3 py-2 text-xs font-mono focus:outline-none focus:border-ember-500 resize-none"
                   />
                   <Button
-                    variant={dirty ? 'primary' : 'secondary'}
+                    variant="primary"
                     size="sm"
                     className="w-full mt-3"
-                    disabled={!dirty || save.isPending}
+                    disabled={regenerate.isPending || save.isPending}
+                    onClick={() => regenerate.mutate()}
+                  >
+                    {regenerate.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+                    {regenerate.isPending
+                      ? 'Sending…'
+                      : dirty
+                        ? `Save & send to ${targetLabel}`
+                        : `Send to ${targetLabel}`}
+                  </Button>
+                  {regenerate.error && (
+                    <div className="text-[11px] text-bad mt-2">{(regenerate.error as Error).message}</div>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="w-full mt-2"
+                    disabled={!dirty || save.isPending || regenerate.isPending}
                     onClick={() => save.mutate()}
                   >
                     {save.isPending ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />}
-                    {save.isPending ? 'Saving…' : dirty ? 'Save prompt' : 'Saved'}
+                    {save.isPending ? 'Saving…' : dirty ? 'Save prompt only' : 'Saved'}
                   </Button>
                   {save.error && (
                     <div className="text-[11px] text-bad mt-2">{(save.error as Error).message}</div>
                   )}
                   <p className="text-[11px] text-text-faint mt-2 leading-snug">
-                    Saving updates the prompt only. To regenerate this shot's image / video with the new prompt, delete its asset row and replay the asset stage — otherwise the worker will reuse the cached R2 object.
+                    “Send to {targetLabel}” saves your edits and re-runs this shot's visual generation — the cached
+                    asset is dropped first so the worker generates fresh. “Save prompt only” stores the text without
+                    regenerating.
                   </p>
                 </>
               )}

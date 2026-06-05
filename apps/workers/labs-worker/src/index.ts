@@ -78,17 +78,38 @@ async function processShot(job: Job) {
     leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
   });
   // Persist the provider job id the instant it's known so a mid-poll crash
-  // leaves a reapable record, and track it for shutdown cancellation.
+  // leaves a reapable record, and track it for shutdown cancellation. 69labs
+  // can re-queue a generation under a NEW id mid-poll; we track every id this
+  // shot has lived under so shutdown/cleanup cancels the live one, not just the
+  // original (cancelling a stale id leaks a provider concurrency slot).
+  const seg = kind === 'image' ? ('images' as const) : ('videos' as const);
+  const myJobIds = new Set<string>();
   let providerJobId: string | undefined;
-  const onSubmit = async (id: string) => {
+  const trackJob = (id: string) => {
     providerJobId = id;
-    inflight.set(id, kind === 'image' ? 'images' : 'videos');
+    myJobIds.add(id);
+    inflight.set(id, seg);
+  };
+  const onSubmit = async (id: string) => {
+    trackJob(id);
     // The job now lives at 69labs; everything until COMPLETED is loc=69LABS.
     phase('69LABS', 'submitted', ` job=${id}`);
     await generationsRepo.markStarted(generation.id, id);
   };
-  // Each 69labs status transition (PENDING→PROCESSING→FINALIZING→…).
-  const onStatus = (status: string) => phase('69LABS', status, providerJobId ? ` job=${providerJobId}` : '');
+  // 69labs swapped in a new underlying job id (it re-queued the generation).
+  const onJobId = (id: string) => {
+    if (myJobIds.has(id)) return;
+    trackJob(id);
+    phase('69LABS', 'restarted', ` job=${id}`);
+    // Point the generation row at the live job so the orphan reaper cancels it.
+    void generationsRepo.markStarted(generation.id, id).catch(() => {});
+  };
+  // Each 69labs status transition (PENDING→PROCESSING→FINALIZING→…), tagged with
+  // the live job id so a mid-poll restart is visible in the console.
+  const onStatus = (status: string, id?: string) => {
+    const jid = id ?? providerJobId;
+    phase('69LABS', status, jid ? ` job=${jid}` : '');
+  };
   try {
     await acquire(kind === 'image' ? '69labs.image' : '69labs.video');
     await generationsRepo.markStarted(generation.id);
@@ -108,6 +129,7 @@ async function processShot(job: Job) {
             aspectRatio: '16:9',
             resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
             onSubmit,
+            onJobId,
           })
         : await labs69.video({
             prompt: prompt.promptText,
@@ -118,6 +140,7 @@ async function processShot(job: Job) {
             // 400. Output is native 16:9 at the model's chosen size and
             // gets scaled to the project's targetRes in the final encode.
             onSubmit,
+            onJobId,
             onStatus,
           });
 
@@ -157,10 +180,10 @@ async function processShot(job: Job) {
     log.error({ shotId, err }, '69labs failed');
     throw err;
   } finally {
-    // labs69.image/video already cancels the provider job on failure, so by
-    // here it's either done or cancelled — drop it from the in-flight set and
-    // free the concurrency slot for the next queued prompt.
-    if (providerJobId) inflight.delete(providerJobId);
+    // labs69.image/video already cancels the provider job(s) on failure, so by
+    // here they're either done or cancelled — drop every id this shot lived
+    // under from the in-flight set and free the concurrency slot.
+    for (const id of myJobIds) inflight.delete(id);
     await slot.release();
   }
 }

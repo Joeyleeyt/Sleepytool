@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { assetsRepo, eventsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
+import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
 import { queues } from '@emberforge/queue';
 import { parseJsonBody } from '@/lib/httpBody';
 
@@ -14,6 +14,13 @@ const RetryBodySchema = z
   .default({});
 
 const DISABLE_VEO3 = (process.env.DISABLE_VEO3 ?? 'false') === 'true';
+
+// Provider ids that belong to each leg, mirrored from /scenes so the retry can
+// retire the stale `failed` generation rows for the leg it re-enqueues. Without
+// this /scenes keeps deriving "failed" from the old row and the card never
+// flips back to the Queued / On 69Labs pill.
+const VISUAL_PROVIDERS = ['veo3', '69labs.video', '69labs.image'];
+const NARRATION_PROVIDERS = ['69labs.tts'];
 
 type VisualRoute = { queue: 'veo3' | 'labsImage' | 'labsVideo'; name: string; data: Record<string, unknown> };
 
@@ -86,6 +93,10 @@ export async function POST(request: Request, { params }: { params: { shotId: str
     await assetsRepo.deleteByShot(shot.id, 'video_clip');
     await assetsRepo.deleteByShot(shot.id, 'image');
 
+    // Retire the leg's failed generation(s) so /scenes stops reporting the shot
+    // as failed and starts surfacing the fresh job's queue/in-labs progress.
+    await generationsRepo.supersedeFailedForShot(shot.id, VISUAL_PROVIDERS);
+
     // Route by the shot's ACTUAL visual prompt target, not by re-reading
     // DISABLE_VEO3 here — the web process's env can differ from the
     // orchestrator's (or DISABLE_VEO3 may have flipped), which would send the
@@ -102,6 +113,7 @@ export async function POST(request: Request, { params }: { params: { shotId: str
 
   if (legs.has('narration')) {
     await assetsRepo.deleteByShot(shot.id, 'audio_narration');
+    await generationsRepo.supersedeFailedForShot(shot.id, NARRATION_PROVIDERS);
     await queues.tts.add('tts', { projectId: shot.projectId, shotId: shot.id });
     enqueued.push({ leg: 'narration', queue: 'tts', name: 'tts' });
   }
