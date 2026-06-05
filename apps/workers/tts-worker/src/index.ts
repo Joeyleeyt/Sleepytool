@@ -5,7 +5,7 @@ import { Worker } from 'bullmq';
 import pino from 'pino';
 import { acquire, connection } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo } from '@emberforge/db';
-import { labs69 } from '@emberforge/ai-clients';
+import { labs69, withProviderKey } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
 
 const log = pino({ name: 'tts-worker' });
@@ -36,11 +36,24 @@ new Worker(
       const t0 = Date.now();
 
       const params = (prompt.params ?? {}) as { voice?: string; pace?: 'slow' | 'medium' | 'fast' };
-      const result = await labs69.tts({
-        text: prompt.promptText,
-        voiceId: params.voice,
-        pace: params.pace,
-      });
+      // Pick a healthy 69labs key from the pool and run the whole TTS
+      // generate→poll→download under it. On a key-attributable failure (bad
+      // key, 402 no-credits, 429) withProviderKey rotates to another key and
+      // re-runs the call — a fresh job under the new account — instead of
+      // failing narration. Content failures (CENSORED) are rethrown immediately
+      // so we don't burn the pool on a doomed prompt. Falls back to the legacy
+      // LABS69_API_KEY env value until the api_keys table is populated.
+      const result = await withProviderKey(
+        '69labs',
+        (apiKey) =>
+          labs69.tts({
+            text: prompt.promptText,
+            voiceId: params.voice,
+            pace: params.pace,
+            apiKey,
+          }),
+        { fallbackKey: process.env.LABS69_API_KEY },
+      );
 
       // 69labs TTS returns MP3 (presigned R2 URL). Download with plain fetch
       // since the URL is already a public signed link.

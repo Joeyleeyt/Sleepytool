@@ -366,15 +366,32 @@ export const labs69 = {
       modelId: input.modelId,
       voiceSettings: input.pace ? { speed: PACE_TO_SPEED[input.pace] } : undefined,
     }, ctx);
-    const done = await pollUntilDone(`/tts/status/${create.id}`, POLL_INTERVAL_MS, undefined, undefined, ctx);
-    const url = await resolveDownloadUrl(`/tts/download/${create.id}`, ctx);
-    return {
-      url,
-      providerJobId: create.id,
-      // outputMetadata is optional on TTS; estimate duration from text if absent
-      durationS: done.outputMetadata?.durationSeconds ?? estimateTtsDurationS(input.text),
-      metadata: { chunksTotal: done.chunksTotal, format: done.outputMetadata?.format ?? 'mp3' },
-    };
+    // Track every job id seen so a failure-cancel hits the live job, not just
+    // the original (a 69labs restart swaps the id and orphans the old slot).
+    const seenIds = new Set<string>([create.id]);
+    try {
+      const done = await pollUntilDone(
+        `/tts/status/${create.id}`,
+        POLL_INTERVAL_MS,
+        undefined,
+        (id) => seenIds.add(id),
+        ctx,
+      );
+      const url = await resolveDownloadUrl(`/tts/download/${create.id}`, ctx);
+      return {
+        url,
+        providerJobId: create.id,
+        // outputMetadata is optional on TTS; estimate duration from text if absent
+        durationS: done.outputMetadata?.durationSeconds ?? estimateTtsDurationS(input.text),
+        metadata: { chunksTotal: done.chunksTotal, format: done.outputMetadata?.format ?? 'mp3' },
+      };
+    } catch (err) {
+      // Poll timeout / restart-loop / download error / CENSORED: cancel every
+      // id we saw so we don't leak a concurrency slot. (FAILED/CANCELLED are
+      // already terminal — cancel is a harmless no-op there.)
+      await Promise.all([...seenIds].map((id) => cancelJob('tts', id, ctx)));
+      throw err;
+    }
   },
 
   async image(input: {
@@ -540,11 +557,11 @@ export const labs69 = {
 
   /**
    * Cancel an in-flight job by id, freeing its provider concurrency slot.
-   * `kind` is the URL segment: 'images' | 'videos' | 'motion-graphics'.
+   * `kind` is the URL segment: 'images' | 'videos' | 'tts' | 'motion-graphics'.
    * Used by scripts/reap-69labs-orphans.ts to clear leaked jobs.
    */
   async cancel(
-    kind: 'images' | 'videos' | 'motion-graphics',
+    kind: 'images' | 'videos' | 'tts' | 'motion-graphics',
     id: string,
     ctx?: Labs69Ctx,
   ): Promise<void> {
