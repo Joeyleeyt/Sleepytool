@@ -129,6 +129,14 @@ export interface EmberOverlayPlan {
  * and `shortest=1` is REQUIRED because every overlay source is infinite (looped
  * asset / endless gradient / looped spark field) — without it the encode never
  * terminates. Returns null when disabled (CINEMATIC_OVERLAY=off).
+ *
+ * The blend is done in RGB (`format=gbrp` on BOTH inputs, then back to yuv420p).
+ * This is NOT optional: `blend` operates per-plane, so a screen blend in yuv420p
+ * runs the screen formula on the U/V chroma planes too. The overlay is black
+ * (chroma = neutral 128) across ~all of the frame, and screen(chroma, 128) ≠
+ * chroma — it pushes BOTH U and V up, tinting the entire frame magenta/pink.
+ * In RGB the overlay's black is (0,0,0) and screen(base, 0) = base, so unlit
+ * areas are untouched and only the embers add warm light.
  */
 export function planEmberOverlay(width: number, height: number, fps: number): EmberOverlayPlan | null {
   const mode = overlayMode();
@@ -145,8 +153,9 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
       kind: 'embers',
       inputArgs: ['-stream_loop', '-1', '-i', fxPath(assetRel)],
       build: (inLabel, outLabel, idx) =>
-        `[${idx}:v]${coverScaleCrop(width, height, fps)},format=yuv420p[ovsrc];` +
-        `[${inLabel}][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1[${outLabel}]`,
+        `[${idx}:v]${coverScaleCrop(width, height, fps)},format=gbrp[ovsrc];` +
+        `[${inLabel}]format=gbrp[ovbase];` +
+        `[ovbase][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1,format=yuv420p[${outLabel}]`,
     };
   }
 
@@ -180,13 +189,14 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
       `loop=loop=-1:size=1,scroll=v=${speed},gblur=sigma=1.4,` +
       `geq=lum='p(X,Y)*(0.16+0.84*(Y/H))',format=rgb24,` +
       `colorchannelmixer=rr=${r.toFixed(3)}:gg=${g.toFixed(3)}:bb=${b.toFixed(3)},` +
-      `scale=${width}:${height},format=yuv420p`;
+      `scale=${width}:${height},format=gbrp`;
     return {
       kind: 'particles',
       inputArgs: [],
       build: (inLabel, outLabel) =>
         `${sparkField}[ovsrc];` +
-        `[${inLabel}][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1[${outLabel}]`,
+        `[${inLabel}]format=gbrp[ovbase];` +
+        `[ovbase][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1,format=yuv420p[${outLabel}]`,
     };
   }
 
@@ -217,7 +227,8 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
     kind: 'lightleak',
     inputArgs: [],
     build: (inLabel, outLabel) =>
-      `${grad},scale=${width}:${height},format=yuv420p[ovsrc];` +
-      `[${inLabel}][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1[${outLabel}]`,
+      `${grad},scale=${width}:${height},format=gbrp[ovsrc];` +
+      `[${inLabel}]format=gbrp[ovbase];` +
+      `[ovbase][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1,format=yuv420p[${outLabel}]`,
   };
 }
