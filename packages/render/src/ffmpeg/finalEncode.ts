@@ -2,6 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 import { ffmpeg } from './run.js';
+import { cinematicGrade, isCinematicGradeEnabled, planEmberOverlay } from './filters.js';
 
 export interface FinalEncodeOpts {
   videoPath: string;
@@ -15,22 +16,25 @@ export interface FinalEncodeOpts {
 
 export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
   const [w, h] = opts.res.split('x');
+  const grade = isCinematicGradeEnabled();
+  const overlay = planEmberOverlay(Number(w), Number(h), opts.fps);
 
-  // FAST PATH — no subtitle burn-in (the default; subs ship as a sidecar).
+  // FAST PATH — nothing to render onto the master: no subtitle burn-in, no grade
+  // (CINEMATIC_GRADE=false) AND no ember/light-leak overlay (CINEMATIC_OVERLAY=off).
   //
-  // `mixClips` already produced `videoPath` as a finished H.264 yuv420p stream
-  // at the target resolution: image segments were encoded to w×h, source video
-  // clips were stream-copied, and the whole thing was joined with the lossless
-  // concat demuxer (which only succeeds when every segment shares the target
-  // dimensions/codec). Re-encoding that master AGAIN through libx264 just to
-  // attach the narration track is a full second encode — hours of CPU on a
-  // 2-hour 1080p timeline for a pixel-identical result.
+  // `mixClips`/`buildSleepMaster` already produced `videoPath` as a finished
+  // H.264 yuv420p stream at the target resolution. When we touch none of the
+  // above, re-encoding it again just to attach the narration track is a wasted
+  // full second encode — hours of CPU on a 2-hour 1080p timeline for a
+  // pixel-identical result. So stream-COPY the video and only (cheaply)
+  // transcode the narration WAV to AAC.
   //
-  // Instead, stream-COPY the already-encoded video and only (cheaply) transcode
-  // the narration WAV to AAC. A 2-hour remux is seconds, not hours. If the copy
-  // mux fails for any reason (unexpected codec/param in the master), fall
-  // through to the full re-encode below so a render never hard-fails.
-  if (!opts.subtitlesPath) {
+  // The global grade (Issue #3) and the ember/light-leak overlay are
+  // intentionally applied HERE, once, to the finished master — the single point
+  // every render path flows through — so every scene shares an identical look.
+  // Both require a real video encode, so enabling either (grade is on by
+  // default) opts out of the stream-copy fast path.
+  if (!opts.subtitlesPath && !grade && !overlay) {
     try {
       await ffmpeg([
         '-y',
@@ -67,7 +71,41 @@ export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
     await copyFile(opts.subtitlesPath, safeSubs);
   }
 
-  const vf = safeSubs ? `subtitles=${escapeForFilter(safeSubs)}` : `scale=${w}:${h}`;
+  // Build ONE filter_complex applied in layered order:
+  //   grade  →  ember/light-leak overlay  →  subtitles
+  // The grade goes first (sets the look); the warm overlay is screen-blended on
+  // top of the graded image; subtitles are burned LAST so text sits above both
+  // the vignette and the embers and stays fully readable. We need
+  // filter_complex (not -vf) because the overlay can pull in a second input (the
+  // looped ember asset), which a simple -vf graph can't reference.
+  //
+  // The ember asset, when used, is appended AFTER the audio input, so it is
+  // ffmpeg input index 2 (0=video, 1=audio, 2=overlay asset).
+  const OVERLAY_ASSET_INDEX = 2;
+  const fc: string[] = [];
+  let vlab = '0:v';
+  if (grade) {
+    fc.push(`[${vlab}]${cinematicGrade()}[fc_grade]`);
+    vlab = 'fc_grade';
+  }
+  if (overlay) {
+    fc.push(overlay.build(vlab, 'fc_overlay', OVERLAY_ASSET_INDEX));
+    vlab = 'fc_overlay';
+  }
+  if (safeSubs) {
+    fc.push(`[${vlab}]subtitles=${escapeForFilter(safeSubs)}[fc_subs]`);
+    vlab = 'fc_subs';
+  }
+  if (fc.length === 0) {
+    fc.push(`[${vlab}]scale=${w}:${h}[fc_scale]`);
+    vlab = 'fc_scale';
+  }
+  const filterComplex = fc.join(';');
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[finalEncode] re-encode master: grade=${grade} overlay=${overlay?.kind ?? 'off'} subs=${!!safeSubs}`,
+  );
 
   // H.264 (AVC) high-profile, level 4.2 — universally playable in browsers
   // (<video> tag works in Chrome / Firefox / Safari / Edge without plugins).
@@ -88,7 +126,10 @@ export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
     '-y',
     '-i', opts.videoPath,
     '-i', opts.audioPath,
-    '-vf', vf,
+    ...(overlay?.inputArgs ?? []), // looped ember asset → input index 2 (if any)
+    '-filter_complex', filterComplex,
+    '-map', `[${vlab}]`,
+    '-map', '1:a:0',
     '-r', String(opts.fps),
     '-c:v', opts.nvenc ? 'h264_nvenc' : 'libx264',
     ...(opts.nvenc
@@ -99,7 +140,6 @@ export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
     '-level:v', '4.2',
     '-c:a', 'aac', '-b:a', '256k',
     '-movflags', '+faststart',
-    '-map', '0:v:0', '-map', '1:a:0',
     opts.outPath,
   ];
 

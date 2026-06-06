@@ -2,7 +2,9 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ffmpeg, ffprobeHasAudio } from './run.js';
 import { concatDemuxer } from './concat.js';
-import { isImageInput, type KenBurnsMode } from './shotComposite.js';
+import { isImageInput } from './shotComposite.js';
+import { kenBurnsFilter, type KenBurnsMode } from './kenBurns.js';
+import { coverScaleCrop } from './filters.js';
 
 export interface MixSegment {
   /** Source file: a video clip (.mp4/.mov/…) or a still image (.png/.jpg/…). */
@@ -46,76 +48,6 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
 
 const AUDIO_SR = 48000;
 
-function evenFloor(n: number): number {
-  return Math.floor(n / 2) * 2;
-}
-
-/**
- * zoompan z/x/y expressions for a Ken Burns move over `totalFrames`.
- *
- * The zoom is driven LINEARLY from the output-frame counter `on`, not the
- * recursive `zoom+step` accumulator. The recursive form re-reads the previous
- * frame's already integer-quantized zoom, so its per-frame step is never
- * exactly uniform (a subtle source of unevenness); an `on`-based ramp advances
- * by an identical delta every frame.
- *
- * Centered moves keep x/y at the crop center. zoompan still floors x/y to whole
- * INPUT pixels, so smoothness depends on the oversampled canvas built in
- * `imageVideoFilter` — there a 1px input step is sub-pixel in the final frame.
- */
-function kenBurnsExpr(mode: KenBurnsMode, totalFrames: number): { zoom: string; x: string; y: string } {
-  const zMax = 1.15;
-  const frames = Math.max(1, totalFrames);
-  // Linear 0 → (zMax-1) ramp over the clip. `on` is the output frame index.
-  const up = `(${(zMax - 1).toFixed(6)}*on/${frames})`;
-  const cx = '(iw-iw/zoom)/2';
-  const cy = '(ih-ih/zoom)/2';
-  switch (mode) {
-    case 'out':
-      return { zoom: `(${zMax}-${up})`, x: cx, y: cy };
-    case 'left':
-      // Pan only within the zoomed headroom (max offset = iw-iw/zoom). The old
-      // `iw*(...)` ran the crop far past the right edge, where zoompan clamps it
-      // and the pan visibly "sticks".
-      return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(1-on/${frames})`, y: cy };
-    case 'right':
-      return { zoom: `(1+${up})`, x: `(iw-iw/zoom)*(on/${frames})`, y: cy };
-    case 'none':
-      // Truly static — a frozen still (used for freeze-frame holds).
-      return { zoom: '1', x: cx, y: cy };
-    case 'in':
-    default:
-      return { zoom: `(1+${up})`, x: cx, y: cy };
-  }
-}
-
-/**
- * Build the still-image-as-video filter. Inputs are already 1K/HD, so there is
- * no upscaling-from-low-res logic; we only add a small oversample so zoompan's
- * integer-pixel crop stays smooth, then scale back to the target frame.
- * Output video label is [v].
- */
-function imageVideoFilter(mode: KenBurnsMode, w: number, h: number, durationS: number, fps: number): string {
-  const totalFrames = Math.max(1, Math.round(durationS * fps));
-  // zoompan rounds its x/y crop offsets to whole INPUT pixels every frame. When
-  // the input canvas is only ~target-size, that 1px rounding is ~1px of visible
-  // jitter as the zoom ramps ⇒ the image "shakes" while zooming. Fix: feed
-  // zoompan a heavily oversampled canvas so 1px of input rounding is sub-pixel in
-  // the final frame, but keep zoompan's OUTPUT (s=) at the TARGET resolution —
-  // zoompan's cost is driven by its output size, so a large input oversample
-  // stays cheap and we drop the extra downscale pass entirely. Must stay above
-  // the 1.15x max zoom; 3x renders smooth. Override with KENBURNS_OVERSAMPLE.
-  const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
-  const rw = evenFloor(w * oversample);
-  const rh = evenFloor(h * oversample);
-  const { zoom, x, y } = kenBurnsExpr(mode, totalFrames);
-  return (
-    `[0:v]scale=${rw}:${rh}:force_original_aspect_ratio=increase,crop=${rw}:${rh},` +
-    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${w}x${h}:fps=${fps},` +
-    `setsar=1,format=yuv420p[v]`
-  );
-}
-
 // `capThreads` is set ONLY for the per-image segment encodes, which run
 // MANY-in-parallel (RENDER_MIX_CONCURRENCY processes). libx264 defaults to one
 // thread per core, so N parallel encodes ⇒ N×cores threads thrashing the
@@ -125,7 +57,8 @@ function imageVideoFilter(mode: KenBurnsMode, w: number, h: number, durationS: n
 // disables the cap entirely (x264 auto-picks).
 function intermediateEncodeArgs(nvenc: boolean, capThreads = false): string[] {
   // Intermediates are concat'd losslessly, so quality here is the final quality.
-  // Still a single fast pass — no FX, no re-encode of video segments.
+  // A single fast pass (no FX); image stills get Ken Burns and video clips get
+  // cover-scaled to the frame (Fix #2 — every clip fills 16:9, no bars).
   const x264Preset = process.env.FFMPEG_INTERMEDIATE_PRESET ?? process.env.FFMPEG_X264_PRESET ?? 'veryfast';
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '20';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
@@ -157,7 +90,15 @@ async function prepImageSegment(seg: MixSegment, opts: MixClipsOpts, outPath: st
     '-y',
     '-loop', '1', '-framerate', String(opts.fps), '-t', String(durationS), '-i', seg.path,
     '-f', 'lavfi', '-t', String(durationS), '-i', `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SR}`,
-    '-filter_complex', imageVideoFilter(seg.kenBurns ?? 'in', opts.width, opts.height, durationS, opts.fps),
+    '-filter_complex', kenBurnsFilter({
+      mode: seg.kenBurns ?? 'in',
+      width: opts.width,
+      height: opts.height,
+      durationS,
+      fps: opts.fps,
+      outputLabel: 'v',
+      suffix: ',format=yuv420p',
+    }),
     '-map', '[v]', '-map', '1:a',
     '-r', String(opts.fps),
     '-t', String(durationS),
@@ -177,27 +118,41 @@ async function prepImageSegment(seg: MixSegment, opts: MixClipsOpts, outPath: st
 }
 
 /**
- * Normalize a video segment for lossless concat. The video stream is always
- * stream-copied (inputs are already 1K/HD) — no re-encode. If the clip has no
- * audio, a silent track is added so its stream layout matches image segments.
+ * Normalize a video segment to the exact target frame. The clip is COVER-scaled
+ * + cropped to w×h (no black bars / letterboxing — see Fix #2) and re-encoded to
+ * the uniform intermediate codec/pixfmt/fps so the lossless demuxer concat
+ * always succeeds. (The old fast path stream-copied the source untouched, which
+ * left non-target-aspect 69labs clips with bars and broke the demuxer concat.)
+ * A silent track is synthesised when the clip has no audio so the stream layout
+ * matches the image segments.
  */
-async function prepVideoSegment(seg: MixSegment, _opts: MixClipsOpts, outPath: string): Promise<void> {
+async function prepVideoSegment(seg: MixSegment, opts: MixClipsOpts, outPath: string): Promise<void> {
   const hasAudio = await ffprobeHasAudio(seg.path);
   const trim = seg.durationS && seg.durationS > 0 ? ['-t', String(seg.durationS)] : [];
+  const vf = `${coverScaleCrop(opts.width, opts.height, opts.fps)},format=yuv420p`;
 
-  const args = hasAudio
-    ? ['-y', '-i', seg.path, ...trim, '-c', 'copy', '-movflags', '+faststart', outPath]
-    : [
-        '-y',
-        '-i', seg.path,
-        '-f', 'lavfi', '-i', `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SR}`,
-        ...trim,
-        '-map', '0:v:0', '-map', '1:a:0',
-        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-ar', String(AUDIO_SR),
-        '-shortest', '-movflags', '+faststart',
-        outPath,
-      ];
-  await ffmpeg(args);
+  const build = (nvenc: boolean): string[] => [
+    '-y',
+    '-i', seg.path,
+    ...(hasAudio ? [] : ['-f', 'lavfi', '-i', `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SR}`]),
+    ...trim,
+    '-map', '0:v:0', '-map', hasAudio ? '0:a:0' : '1:a:0',
+    '-vf', vf,
+    '-r', String(opts.fps),
+    ...intermediateEncodeArgs(nvenc, true), // capThreads: many-in-parallel
+    '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '192k', '-ar', String(AUDIO_SR),
+    ...(hasAudio ? [] : ['-shortest']),
+    '-movflags', '+faststart',
+    outPath,
+  ];
+
+  try {
+    await ffmpeg(build(!!opts.nvenc));
+  } catch (err) {
+    if (!isNvencFailure(opts.nvenc, err)) throw err;
+    await ffmpeg(build(false));
+  }
 }
 
 /**
@@ -218,17 +173,18 @@ async function mixViaConcatFilter(opts: MixClipsOpts): Promise<void> {
     if (isImageInput(seg.path)) {
       if (!dur || dur <= 0) throw new Error(`image segment needs a durationS: ${seg.path}`);
       inputs.push('-loop', '1', '-framerate', String(fps), '-t', String(dur), '-i', seg.path);
-      const totalFrames = Math.max(1, Math.round(dur * fps));
-      // Same anti-shake recipe as imageVideoFilter(): oversample the input canvas
-      // so zoompan's integer x/y rounding is sub-pixel, output at target res.
-      const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
-      const rw = evenFloor(w * oversample);
-      const rh = evenFloor(h * oversample);
-      const { zoom, x, y } = kenBurnsExpr(seg.kenBurns ?? 'in', totalFrames);
+      // Same shared anti-shake Ken Burns as the fast path.
       vparts.push(
-        `[${idx}:v]scale=${rw}:${rh}:force_original_aspect_ratio=increase,crop=${rw}:${rh},` +
-          `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${w}x${h}:fps=${fps},` +
-          `setsar=1,format=yuv420p,setpts=PTS-STARTPTS[v${idx}]`,
+        kenBurnsFilter({
+          mode: seg.kenBurns ?? 'in',
+          width: w,
+          height: h,
+          durationS: dur,
+          fps,
+          inputLabel: `${idx}:v`,
+          outputLabel: `v${idx}`,
+          suffix: ',format=yuv420p,setpts=PTS-STARTPTS',
+        }),
       );
       aparts.push(
         `anullsrc=channel_layout=stereo:sample_rate=${AUDIO_SR},atrim=0:${dur},asetpts=PTS-STARTPTS[a${idx}]`,
@@ -237,8 +193,7 @@ async function mixViaConcatFilter(opts: MixClipsOpts): Promise<void> {
       inputs.push('-i', seg.path);
       const trimV = dur && dur > 0 ? `,trim=0:${dur}` : '';
       vparts.push(
-        `[${idx}:v]scale=${w}:${h}:force_original_aspect_ratio=increase,crop=${w}:${h},` +
-          `fps=${fps},setsar=1,format=yuv420p${trimV},setpts=PTS-STARTPTS[v${idx}]`,
+        `[${idx}:v]${coverScaleCrop(w, h, fps)},format=yuv420p${trimV},setpts=PTS-STARTPTS[v${idx}]`,
       );
       const trimA = dur && dur > 0 ? `,atrim=0:${dur}` : '';
       // eslint-disable-next-line no-await-in-loop
@@ -279,23 +234,23 @@ async function mixViaConcatFilter(opts: MixClipsOpts): Promise<void> {
 /**
  * Mix an ordered list of video clips and still images into a single HD video.
  *
- * Fast path: encode ONLY the image segments (Ken Burns at the target
- * resolution, no upscaling), stream-copy every video segment, then join the
- * lot with the lossless concat demuxer — so existing 1K/HD video is never
- * re-encoded. Video clips keep their own audio (silent tracks are synthesized
- * for images and audio-less clips so the stream layout is uniform).
+ * Each segment is normalised to the SAME target frame, codec and pixel format:
+ * image segments get jitter-free Ken Burns, video segments get cover-scaled +
+ * cropped to fill the 16:9 frame (Fix #2 — no black bars / letterboxing). Both
+ * carry an audio track (clips keep their own; silent stereo is synthesised for
+ * images and audio-less clips). The uniform segments are then joined with the
+ * lossless concat demuxer.
  *
- * Fallback: if the prepared segments can't be demuxer-concatenated (codec or
- * pixel-format mismatch between source videos and the image encodes), the whole
- * timeline is rebuilt in a single concat-filter re-encode pass.
+ * Fallback: if the prepared segments still can't be demuxer-concatenated, the
+ * whole timeline is rebuilt in a single concat-filter re-encode pass.
  */
 export async function mixClips(opts: MixClipsOpts): Promise<void> {
   if (opts.segments.length === 0) throw new Error('mixClips: no segments');
   const workDir = opts.workDir ?? path.join(path.dirname(opts.outPath), 'mix_segments');
   await mkdir(workDir, { recursive: true });
 
-  // 1) Prepare each segment to a uniform container (images encoded, videos
-  //    copied). Runs in parallel; results keep order for the concat below.
+  // 1) Prepare each segment to a uniform container (images get Ken Burns,
+  //    videos get cover-scaled). Runs in parallel; order preserved for concat.
   const prepared = await mapLimit(opts.segments, opts.concurrency ?? 4, async (seg, i) => {
     const segOut = path.join(workDir, `seg_${i.toString().padStart(4, '0')}.mp4`);
     if (isImageInput(seg.path)) {

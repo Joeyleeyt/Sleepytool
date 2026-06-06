@@ -3,6 +3,8 @@ import path from 'node:path';
 import { ffmpeg, ffprobeDuration, extractLastFrame } from './run.js';
 import { buildXfadeChain, concatDemuxer, type XfadeStep } from './concat.js';
 import { isImageInput } from './shotComposite.js';
+import { kenBurnsFilter } from './kenBurns.js';
+import { coverScaleCrop } from './filters.js';
 
 /**
  * One clip in the sleep timeline. Lengths are pre-computed by the caller so that
@@ -67,10 +69,6 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T, index: nu
   return results;
 }
 
-function evenFloor(n: number): number {
-  return Math.floor(n / 2) * 2;
-}
-
 function intermediateEncodeArgs(nvenc: boolean): string[] {
   const x264Preset = process.env.FFMPEG_INTERMEDIATE_PRESET ?? process.env.FFMPEG_X264_PRESET ?? 'veryfast';
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '20';
@@ -95,40 +93,14 @@ async function runWithNvencFallback(build: (nvenc: boolean) => string[], nvenc: 
   }
 }
 
-/**
- * Very-slow Ken Burns for a single still input ([0:v] → [v]). A linear zoom from
- * 1.0 → maxZoom plus a slow pan across the (tiny) zoom headroom. Direction
- * alternates by index. With maxZoom ≈ 1.02 the headroom is ~2% of frame width,
- * so both the zoom and the pan are sub-perceptual — exactly what a sleep video
- * wants. The input canvas is oversampled so zoompan's whole-input-pixel x/y
- * rounding is sub-pixel in the final frame (no shimmer).
- */
-function sleepKenBurnsFilter(
-  index: number,
-  w: number,
-  h: number,
-  durationS: number,
-  fps: number,
-  maxZoom: number,
-): string {
-  const totalFrames = Math.max(1, Math.round(durationS * fps));
-  const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
-  const rw = evenFloor(w * oversample);
-  const rh = evenFloor(h * oversample);
-  const up = `(${(maxZoom - 1).toFixed(6)}*on/${totalFrames})`;
-  const zoom = `(1+${up})`;
-  const panRight = index % 2 === 0;
-  const x = panRight ? `(iw-iw/zoom)*(on/${totalFrames})` : `(iw-iw/zoom)*(1-on/${totalFrames})`;
-  const y = '(ih-ih/zoom)/2';
-  return (
-    `[0:v]scale=${rw}:${rh}:force_original_aspect_ratio=increase,crop=${rw}:${rh},` +
-    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${w}x${h}:fps=${fps},` +
-    `setsar=1,format=yuv420p[v]`
-  );
-}
-
 /** Render a still image into a `durationS`-long, silent, target-res clip with a
- *  barely-perceptible Ken Burns move. Used for image assets and frozen tails. */
+ *  barely-perceptible Ken Burns move. Used for image assets and frozen tails.
+ *
+ *  The motion uses the shared, jitter-free `kenBurnsFilter` (see kenBurns.ts):
+ *  an eased zoom up to `maxZoom` (≈1.02 — sub-perceptual) plus a slow pan whose
+ *  direction alternates by index so long runs of stills don't all drift the
+ *  same way. The heavy input oversample keeps zoompan's per-frame pixel floor
+ *  sub-pixel, so there is no shimmer even on the slowest sleep-story pushes. */
 async function prepStillSegment(
   srcImage: string,
   durationS: number,
@@ -140,7 +112,16 @@ async function prepStillSegment(
   const build = (nvenc: boolean): string[] => [
     '-y',
     '-loop', '1', '-framerate', String(opts.fps), '-t', String(durationS), '-i', srcImage,
-    '-filter_complex', sleepKenBurnsFilter(index, opts.width, opts.height, durationS, opts.fps, maxZoom),
+    '-filter_complex', kenBurnsFilter({
+      mode: index % 2 === 0 ? 'right' : 'left',
+      width: opts.width,
+      height: opts.height,
+      durationS,
+      fps: opts.fps,
+      maxZoom,
+      outputLabel: 'v',
+      suffix: ',format=yuv420p',
+    }),
     '-map', '[v]',
     '-r', String(opts.fps),
     '-t', String(durationS),
@@ -161,9 +142,7 @@ async function prepVideoSegment(
   opts: BuildSleepMasterOpts,
   outPath: string,
 ): Promise<void> {
-  const vf =
-    `scale=${opts.width}:${opts.height}:force_original_aspect_ratio=increase,` +
-    `crop=${opts.width}:${opts.height},fps=${opts.fps},setsar=1,format=yuv420p`;
+  const vf = `${coverScaleCrop(opts.width, opts.height, opts.fps)},format=yuv420p`;
   const build = (nvenc: boolean): string[] => [
     '-y',
     '-i', src,

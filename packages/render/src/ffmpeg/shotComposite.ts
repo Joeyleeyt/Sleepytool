@@ -1,8 +1,10 @@
 import path from 'node:path';
 import { ffmpeg } from './run.js';
 import { embersAlpha, fxExists, fxPath, FX, smokeAlpha, type EmberLevel, type SmokeLevel } from '../fxLibrary.js';
+import { kenBurnsFilter, type KenBurnsMode } from './kenBurns.js';
+import { cinematicGrade, coverScaleCrop } from './filters.js';
 
-export type KenBurnsMode = 'none' | 'in' | 'out' | 'left' | 'right';
+export type { KenBurnsMode } from './kenBurns.js';
 
 export interface ShotCompositeOpts {
   videoPath: string;
@@ -27,73 +29,16 @@ export function isImageInput(p: string): boolean {
 }
 
 /**
- * Build a Ken Burns zoompan filter. Output is "still image as video", so we
- * also handle scale + duration here. The base node label is [base].
+ * Build a Ken Burns zoompan filter for a still image. Output node is [base].
+ * Delegates to the shared, jitter-free `kenBurnsFilter` (see kenBurns.ts).
  */
 function imageBaseFilter(mode: KenBurnsMode, width: number, height: number, durationS: number, fps: number): string {
-  const totalFrames = Math.max(1, Math.round(durationS * fps));
-  // zoompan rounds its x/y crop offsets to whole INPUT pixels each frame, so a
-  // near-target-size canvas produces ~1px of visible shake as the zoom ramps.
-  // Oversample the INPUT canvas (1px rounding ⇒ sub-pixel in the final frame)
-  // but keep zoompan's OUTPUT (s=) at the target res — zoompan's cost tracks its
-  // output size, so the big input stays cheap and we drop the extra downscale.
-  // Must stay above the 1.15x max zoom; 3x renders smooth.
-  const oversample = Math.max(2, Number(process.env.KENBURNS_OVERSAMPLE ?? '3'));
-  const even = (n: number) => Math.round(n / 2) * 2;
-  const renderW = even(width * oversample);
-  const renderH = even(height * oversample);
-  const zMax = 1.15;
-  // Drive the zoom LINEARLY from the output-frame counter `on`, not the
-  // recursive `zoom+step` accumulator — the recursive form re-reads the
-  // previous frame's already-quantized zoom and so steps unevenly.
-  const up = `(${(zMax - 1).toFixed(6)}*on/${totalFrames})`;
-  const cx = '(iw-iw/zoom)/2';
-  const cy = '(ih-ih/zoom)/2';
-
-  let zoom: string;
-  let x: string;
-  let y: string;
-  switch (mode) {
-    case 'out':
-      zoom = `(${zMax}-${up})`;
-      x = cx;
-      y = cy;
-      break;
-    case 'left':
-      // Pan only within the zoomed headroom (max offset = iw-iw/zoom); the old
-      // `iw*(...)` drove the crop off the right edge where zoompan clamps it.
-      zoom = `(1+${up})`;
-      x = `(iw-iw/zoom)*(1-on/${totalFrames})`;
-      y = cy;
-      break;
-    case 'right':
-      zoom = `(1+${up})`;
-      x = `(iw-iw/zoom)*(on/${totalFrames})`;
-      y = cy;
-      break;
-    case 'in':
-    case 'none':
-    default:
-      zoom = `(1+${up})`;
-      x = cx;
-      y = cy;
-      break;
-  }
-
-  // oversample input → zoompan (output direct to target res) → sar
-  return (
-    `[0:v]scale=${renderW}:${renderH}:force_original_aspect_ratio=increase,` +
-    `crop=${renderW}:${renderH},` +
-    `zoompan=z='${zoom}':x='${x}':y='${y}':d=${totalFrames}:s=${width}x${height}:fps=${fps},` +
-    `setsar=1[base]`
-  );
+  return kenBurnsFilter({ mode, width, height, durationS, fps, outputLabel: 'base' });
 }
 
+/** Cover-scale a video source to fill the frame (no bars). Output node [base]. */
 function videoBaseFilter(width: number, height: number, fps: number): string {
-  return (
-    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
-    `crop=${width}:${height},fps=${fps},setsar=1[base]`
-  );
+  return `[0:v]${coverScaleCrop(width, height, fps)}[base]`;
 }
 
 /**
@@ -167,9 +112,9 @@ export async function compositeShot(opts: ShotCompositeOpts): Promise<void> {
     chain = 'withGrain';
   }
 
-  // color grade + vignette
-  const vignette = opts.vignette > 0 ? `,vignette=PI/${(6 - opts.vignette * 3).toFixed(2)}` : '';
-  filters.push(`[${chain}]eq=contrast=1.12:saturation=0.93:brightness=-0.02${vignette}[final]`);
+  // Global cinematic documentary grade (warm highlights, filmic contrast,
+  // gentle vignette) — the SAME look applied everywhere for consistency.
+  filters.push(`[${chain}]${cinematicGrade()}[final]`);
 
   // narration normalization
   filters.push(`[1:a]aresample=48000,loudnorm=I=-18:TP=-2:LRA=11[narration]`);
