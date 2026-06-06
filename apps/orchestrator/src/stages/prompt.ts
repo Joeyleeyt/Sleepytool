@@ -1,6 +1,6 @@
-import { eventsRepo, projectsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
+import { eventsRepo, projectsRepo, promptsRepo, scenesRepo, shotsRepo, transcriptsRepo } from '@emberforge/db';
 import { inputHash, type Shot, type StylePresetId } from '@emberforge/core';
-import { buildAtmosphericPrompt, buildImagePrompt, buildVeo3Prompt } from '@emberforge/prompt-engine';
+import { buildAtmosphericPrompt, buildImagePrompt, buildStyleAnchor, buildVeo3Prompt } from '@emberforge/prompt-engine';
 
 export async function promptStage(projectId: string) {
   await eventsRepo.emit(projectId, 'prompt', 'started');
@@ -10,15 +10,31 @@ export async function promptStage(projectId: string) {
 
   const stylePreset = project.stylePreset as StylePresetId;
 
+  // Project-wide continuity inputs from the analyse step. `analysisJson` is
+  // jsonb (typed `unknown`); narrow defensively since labs-only projects skip
+  // analyze and leave it null. Scene atmosphere comes from the scenes table.
+  const transcript = await transcriptsRepo.findByProject(projectId);
+  const analysis = (transcript?.analysisJson ?? {}) as { globalTopic?: string; toneSummary?: string };
+  const scenes = await scenesRepo.findByProject(projectId);
+  const atmosphereByScene = new Map(scenes.map((s) => [s.id, s.atmosphere ?? null]));
+
   for (const row of shots) {
     const shot = rowToShot(row);
     const visualTarget = pickTarget(shot.visualType);
     const voice = process.env.LABS69_VOICE_ID ?? 'narrator_deep_male_1';
     const ttsHash = inputHash({ text: shot.narrationText, voice });
 
+    // Shared global-style anchor injected into every shot so the whole video
+    // keeps one coherent look + mood and the stream doesn't drift shot-to-shot.
+    const anchor = buildStyleAnchor({
+      globalTopic: analysis.globalTopic,
+      toneSummary: analysis.toneSummary,
+      atmosphere: atmosphereByScene.get(shot.sceneId) ?? null,
+    });
+
     // Visual prompt
     if (visualTarget) {
-      const built = await buildVisualPrompt(shot, projectId, stylePreset);
+      const built = await buildVisualPrompt(shot, projectId, stylePreset, anchor);
       const hash = inputHash({ prompt: built.prompt, negative: built.negative, target: visualTarget, model_version: 'v1' });
       await promptsRepo.upsert({
         shotId: shot.id,
@@ -65,21 +81,21 @@ function pickTarget(vt: Shot['visualType']): string | null {
   }
 }
 
-async function buildVisualPrompt(shot: Shot, projectId: string, stylePreset: StylePresetId) {
+async function buildVisualPrompt(shot: Shot, projectId: string, stylePreset: StylePresetId, anchor: string) {
   switch (shot.visualType) {
     case 'cinematic_video':
       // Veo3 prompt format works fine for 69labs video too — both expect a
       // single cinematic description string.
-      return buildVeo3Prompt({ shot, projectId, stylePreset });
+      return buildVeo3Prompt({ shot, projectId, stylePreset, anchor });
     case 'image_with_motion':
-      return buildImagePrompt({ shot, projectId, stylePreset });
+      return buildImagePrompt({ shot, projectId, stylePreset, anchor });
     case 'atmospheric_broll':
-      return buildAtmosphericPrompt({ shot, stylePreset });
+      return buildAtmosphericPrompt({ shot, projectId, stylePreset, anchor });
     // Safe-mode fallback for motion-graphics types
     case 'infographic':
     case 'animated_diagram':
     case 'motion_typography':
-      return buildAtmosphericPrompt({ shot, stylePreset });
+      return buildAtmosphericPrompt({ shot, projectId, stylePreset, anchor });
   }
 }
 

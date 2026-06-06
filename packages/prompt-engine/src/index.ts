@@ -1,4 +1,6 @@
 export * from './stylePalette.js';
+export * from './frameGuard.js';
+export * from './styleAnchor.js';
 export * from './lensVocab.js';
 export * from './visualMemory.js';
 export * from './builders/cinematic.js';
