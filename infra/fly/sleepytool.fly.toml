@@ -17,6 +17,14 @@ primary_region = 'lhr'
   NVENC_ENABLED = 'false'
   RENDER_WORK_DIR = '/data/emberforge'
 
+  # The final encode now re-encodes the master (it applies the global cinematic
+  # grade + rising-ember overlay — see packages/render/src/ffmpeg/filters.ts),
+  # rather than stream-copying. On this CPU-only VM 'veryfast' keeps that full
+  # 1080p pass tractable. Drop to 'medium' for higher quality / slower renders,
+  # or set CINEMATIC_GRADE='false' + CINEMATIC_OVERLAY='off' to restore the
+  # instant stream-copy mux.
+  FFMPEG_X264_PRESET = 'veryfast'
+
   # --- Sleep-story renderer (render process) ---
   # Every clip cross-dissolves into the next (no hard cuts), short clips hold a
   # frozen slow-Ken-Burns last frame, narration stays authoritative. Set
@@ -61,10 +69,13 @@ primary_region = 'lhr'
   processes = ['workers']
 
 [[vm]]
-  # CPU-bound ffmpeg. With the stream-copy final mux (no GPU/NVENC), the only
-  # real encode is the parallel Ken Burns image segments — 8 cores serve that
-  # well; the rest of the pipeline is mux/I-O bound. 16gb covers ~8 parallel
-  # 1080p zoompan encodes with room to spare.
+  # CPU-bound ffmpeg (no GPU/NVENC). Two encode-heavy stages: the parallel Ken
+  # Burns image segments, and the single final pass — which now RE-ENCODES the
+  # master to bake in the global cinematic grade + rising-ember overlay (it no
+  # longer stream-copies). 8 cores at FFMPEG_X264_PRESET='veryfast' (see [env])
+  # keep both tractable; 16gb covers ~8 parallel 1080p zoompan encodes with room
+  # to spare. Set CINEMATIC_GRADE='false' + CINEMATIC_OVERLAY='off' to drop the
+  # final re-encode back to an instant stream-copy mux.
   size = 'performance-8x'
   memory = '16gb'
   processes = ['render']
