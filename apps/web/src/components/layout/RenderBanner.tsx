@@ -8,6 +8,22 @@ import { api } from '@/lib/api';
 import { formatDuration } from '@/lib/utils';
 
 /**
+ * Navigate to a signed URL that carries `Content-Disposition: attachment`, so
+ * the browser saves the MP4 instead of opening it in a new tab. The anchor's
+ * `download` hint only applies same-origin; the server-set header is what makes
+ * the cross-origin R2 download reliable.
+ */
+function triggerDownload(url: string, filename: string) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+/**
  * Shown at the bottom of the project shell when the project status is
  * `published`. Provides one-click playback + download of the final MP4.
  */
@@ -45,7 +61,7 @@ export function RenderBanner() {
         <Button size="sm" onClick={() => setOpen(true)}>
           <Play size={13} /> Watch
         </Button>
-        <Button size="sm" variant="primary" onClick={() => window.open(render.url, '_blank')}>
+        <Button size="sm" variant="primary" onClick={() => triggerDownload(render.downloadUrl, `${projectId}.mp4`)}>
           <Download size={13} /> Download
         </Button>
       </div>

@@ -129,7 +129,9 @@ export const api = {
     http<{ events: ProjectEvent[] }>(`/v1/projects/${id}/events?since=${since}`),
 
   getRenderUrl: (id: string) =>
-    http<{ url: string; durationS: string | null; renderId: string }>(`/v1/projects/${id}/render-url`),
+    http<{ url: string; downloadUrl: string; durationS: string | null; renderId: string }>(
+      `/v1/projects/${id}/render-url`,
+    ),
 
   getAssetUrl: (id: string) =>
     http<{ url: string; kind: AssetKind; durationS: string | null; bytes: number | null }>(`/v1/assets/${id}/url`),

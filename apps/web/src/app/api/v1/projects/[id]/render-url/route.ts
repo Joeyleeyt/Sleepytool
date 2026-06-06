@@ -17,8 +17,14 @@ export async function GET(_request: Request, { params }: { params: { id: string 
   if (!r || !r.r2Key) {
     return NextResponse.json({ error: 'no completed render' }, { status: 404 });
   }
+  const downloadAs = `${id}.mp4`;
+  const [url, downloadUrl] = await Promise.all([
+    signGet(r.r2Key, 3600),
+    signGet(r.r2Key, 3600, { downloadAs }),
+  ]);
   return NextResponse.json({
-    url: await signGet(r.r2Key, 3600),
+    url,
+    downloadUrl,
     durationS: r.durationS,
     renderId: r.id,
   });
