@@ -43,7 +43,8 @@
     "FFMPEG_NVENC_PRESET",
     "FFMPEG_NVENC_CQ",
     "FX_LIBRARY_DIR",
-    "API_KEY_ENCRYPTION_SECRET"
+    "API_KEY_ENCRYPTION_SECRET",
+    "LABS69_IMAGE_RESOLUTION"
   ],
   "tasks": {
     "build": {

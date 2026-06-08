@@ -16,6 +16,7 @@ export async function buildImagePrompt(opts: {
   const memory = await recallMemory(opts.projectId, opts.shot);
 
   const parts = [
+    STILL_MOTION,
     opts.shot.visualSummary,
     memory && `featuring ${memory}`,
     opts.anchor,
@@ -24,7 +25,6 @@ export async function buildImagePrompt(opts: {
     palette.ambient,
     `${palette.grade} color grade`,
     'still frame, photoreal, hyperdetailed, cinematic composition',
-    STILL_MOTION,
     FULL_FRAME_GUARD,
   ].filter((x): x is string => Boolean(x));
 

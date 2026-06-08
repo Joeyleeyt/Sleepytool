@@ -2,7 +2,7 @@ import type { Shot, StylePresetId } from '@emberforge/core';
 import { getPalette } from '../stylePalette.js';
 import { FULL_FRAME_GUARD } from '../frameGuard.js';
 import { CAMERA_DESCRIPTION, LENS_DESCRIPTION } from '../lensVocab.js';
-import { motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
+import { motionLead, motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
 import { recallMemory } from '../visualMemory.js';
 
 export async function buildVeo3Prompt(opts: {
@@ -16,6 +16,7 @@ export async function buildVeo3Prompt(opts: {
   const memory = await recallMemory(opts.projectId, opts.shot);
 
   const parts: string[] = [
+    motionLead(),
     opts.shot.visualSummary,
     memory && `featuring ${memory}`,
     opts.anchor,

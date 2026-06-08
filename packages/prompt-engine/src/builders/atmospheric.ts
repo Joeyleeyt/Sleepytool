@@ -1,7 +1,7 @@
 import type { Shot, StylePresetId } from '@emberforge/core';
 import { getPalette } from '../stylePalette.js';
 import { FULL_FRAME_GUARD } from '../frameGuard.js';
-import { motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
+import { motionLead, motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
 import { recallMemory } from '../visualMemory.js';
 
 /**
@@ -25,6 +25,7 @@ export async function buildAtmosphericPrompt(opts: {
     kinds: ['environment', 'palette', 'style_token'],
   });
   const prompt = [
+    motionLead(),
     opts.shot.visualSummary || 'atmospheric environmental footage',
     memory && `set in ${memory}`,
     opts.anchor,

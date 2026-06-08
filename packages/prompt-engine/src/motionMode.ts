@@ -3,14 +3,18 @@
  * frame is allowed to move, appended to EVERY 69labs (and Veo3) generation
  * prompt.
  *
- * WHY THIS LIVES IN THE PROMPT
+ * WHY THIS LIVES IN THE POSITIVE PROMPT
  * 69labs' image and video endpoints expose NO `motion_intensity` / zoom-speed /
- * parallax knob (see packages/ai-clients/src/labs69.ts — image/video take only
- * prompt, negative, model, aspectRatio, resolution, seed). The ONLY lever on how
- * fast the generated clip moves is the prompt text and the negative prompt. So
- * the product's "SLEEP MODE" spec is encoded here as language and injected into
- * the cinematic / image / atmospheric builders, plus a shared negative that
- * actively suppresses the energetic motion the video models default to.
+ * parallax knob, AND they IGNORE the negative prompt entirely — image()/video()
+ * in packages/ai-clients/src/labs69.ts transmit only the positive `prompt`
+ * (model / aspectRatio / resolution / seed); `negative` is accepted "for API
+ * parity" but never sent. So the ONLY lever on how fast a 69labs clip moves is
+ * the POSITIVE prompt text. The product's "SLEEP MODE" spec is therefore encoded
+ * here as positive language — both a high-weight LEAD at the front of the prompt
+ * (motionLead) and a detailed directive later (motionDirective) — with all the
+ * "no fast motion" suppressions phrased POSITIVELY so they survive the dropped
+ * negative. MOTION_NEGATIVE is kept too for the Veo3 path (veo3.ts DOES send
+ * negativePrompt), where it still bites.
  *
  * The render-side motion (Ken Burns on stills, cross-dissolves between shots) is
  * already sleep-safe and tuned separately — see packages/render (kenBurnsFilter
@@ -32,26 +36,44 @@ export function getMotionMode(): MotionMode {
 }
 
 // 🛌 SLEEP MODE positive directive — near-total stillness baked into the clip.
+// Every clause is phrased positively (or as an in-prompt "no X") so it works
+// even though 69labs drops the negative prompt.
 const SLEEP_MOTION =
-  'SLEEP MODE: extremely slow, near-imperceptible motion, motion intensity 0.05 to 0.1, ' +
+  'extremely slow, near-imperceptible motion, motion intensity 0.05 to 0.1, ' +
   'camera locked-off or micro-dolly only, no parallax, no zoom, ' +
   'any drift slower than 0.5% per second, ' +
   'one single continuous uninterrupted shot, no cuts or transitions inside the shot, ' +
-  'all objects in the scene remain still, the frame is held almost perfectly static';
+  'all objects in the scene remain still, the frame is held almost perfectly static, ' +
+  'no camera shake, no motion blur, no fast or sudden movement';
 
 // 🌙 DREAM MODE positive directive — one slow move, otherwise still.
 const DREAM_MOTION =
-  'DREAM MODE: very slow, gentle motion, motion intensity 0.1 to 0.15, ' +
+  'very slow, gentle motion, motion intensity 0.1 to 0.15, ' +
   'a single slow pan OR a single slow push only, mild parallax allowed, no zoom, ' +
   'one single continuous uninterrupted shot, no cuts or transitions inside the shot, ' +
-  'objects in the scene stay nearly still, the frame drifts almost imperceptibly';
+  'objects in the scene stay nearly still, the frame drifts almost imperceptibly, ' +
+  'no camera shake, no motion blur, no fast or sudden movement';
 
 /**
  * Positive motion directive for VIDEO / camera-motion prompts (cinematic +
- * atmospheric b-roll). Reflects the active MOTION_MODE.
+ * atmospheric b-roll). Reflects the active MOTION_MODE. Placed mid-prompt to
+ * reinforce the front-loaded motionLead().
  */
 export function motionDirective(mode: MotionMode = getMotionMode()): string {
   return mode === 'dream' ? DREAM_MOTION : SLEEP_MOTION;
+}
+
+// High-weight motion LEAD prepended to the FRONT of every generation prompt.
+// These models weight their opening tokens most, and 69labs has no negative
+// prompt to lean on, so leading with stillness is the single strongest lever.
+// motionDirective() repeats the constraint in detail later in the prompt.
+const SLEEP_LEAD =
+  'near-frozen, almost completely still footage, no perceptible movement, calm and motionless';
+const DREAM_LEAD = 'slow, gently drifting footage, minimal movement, calm and tranquil';
+
+/** Short, front-of-prompt motion lead for VIDEO prompts. Reflects MOTION_MODE. */
+export function motionLead(mode: MotionMode = getMotionMode()): string {
+  return mode === 'dream' ? DREAM_LEAD : SLEEP_LEAD;
 }
 
 /**
@@ -61,7 +83,8 @@ export function motionDirective(mode: MotionMode = getMotionMode()): string {
  * same MOTION_NEGATIVE below still suppresses any implied movement / blur.
  */
 export const STILL_MOTION =
-  'perfectly still calm composition, no implied motion, no motion blur, no sense of movement, serene and static';
+  'perfectly still calm composition, no implied motion, no motion blur, no sense of movement, ' +
+  'no camera shake, serene and static';
 
 /**
  * Shared NEGATIVE motion directive — appended to every builder's negative
