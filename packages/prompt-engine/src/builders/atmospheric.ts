@@ -1,6 +1,7 @@
 import type { Shot, StylePresetId } from '@emberforge/core';
 import { getPalette } from '../stylePalette.js';
 import { FULL_FRAME_GUARD } from '../frameGuard.js';
+import { motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
 import { recallMemory } from '../visualMemory.js';
 
 /**
@@ -27,7 +28,8 @@ export async function buildAtmosphericPrompt(opts: {
     opts.shot.visualSummary || 'atmospheric environmental footage',
     memory && `set in ${memory}`,
     opts.anchor,
-    'slow drifting camera, no people, abstract textural motion',
+    'no people',
+    motionDirective(),
     palette.ambient,
     palette.lighting,
     `${palette.grade} color grade`,
@@ -36,5 +38,8 @@ export async function buildAtmosphericPrompt(opts: {
   ]
     .filter((x): x is string => Boolean(x))
     .join(', ');
-  return { prompt, negative: [palette.negative, opts.extraNegative].filter(Boolean).join(', ') };
+  return {
+    prompt,
+    negative: [palette.negative, opts.extraNegative, MOTION_NEGATIVE].filter(Boolean).join(', '),
+  };
 }

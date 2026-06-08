@@ -2,6 +2,7 @@ import type { Shot, StylePresetId } from '@emberforge/core';
 import { getPalette } from '../stylePalette.js';
 import { FULL_FRAME_GUARD } from '../frameGuard.js';
 import { CAMERA_DESCRIPTION, LENS_DESCRIPTION } from '../lensVocab.js';
+import { motionDirective, MOTION_NEGATIVE } from '../motionMode.js';
 import { recallMemory } from '../visualMemory.js';
 
 export async function buildVeo3Prompt(opts: {
@@ -20,6 +21,7 @@ export async function buildVeo3Prompt(opts: {
     opts.anchor,
     LENS_DESCRIPTION[opts.shot.lens],
     CAMERA_DESCRIPTION[opts.shot.cameraMovement],
+    motionDirective(),
     palette.ambient,
     palette.lighting,
     `${palette.grade} color grade`,
@@ -29,6 +31,6 @@ export async function buildVeo3Prompt(opts: {
 
   return {
     prompt: parts.join(', '),
-    negative: [palette.negative, opts.extraNegative].filter(Boolean).join(', '),
+    negative: [palette.negative, opts.extraNegative, MOTION_NEGATIVE].filter(Boolean).join(', '),
   };
 }

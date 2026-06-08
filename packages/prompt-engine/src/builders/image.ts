@@ -2,6 +2,7 @@ import type { Shot, StylePresetId } from '@emberforge/core';
 import { getPalette } from '../stylePalette.js';
 import { FULL_FRAME_GUARD } from '../frameGuard.js';
 import { LENS_DESCRIPTION } from '../lensVocab.js';
+import { STILL_MOTION, MOTION_NEGATIVE } from '../motionMode.js';
 import { recallMemory } from '../visualMemory.js';
 
 export async function buildImagePrompt(opts: {
@@ -23,11 +24,12 @@ export async function buildImagePrompt(opts: {
     palette.ambient,
     `${palette.grade} color grade`,
     'still frame, photoreal, hyperdetailed, cinematic composition',
+    STILL_MOTION,
     FULL_FRAME_GUARD,
   ].filter((x): x is string => Boolean(x));
 
   return {
     prompt: parts.join(', '),
-    negative: [palette.negative, opts.extraNegative].filter(Boolean).join(', '),
+    negative: [palette.negative, opts.extraNegative, MOTION_NEGATIVE].filter(Boolean).join(', '),
   };
 }
