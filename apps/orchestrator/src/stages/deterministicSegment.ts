@@ -1,55 +1,56 @@
 /**
  * Labs-only / no-LLM mode. Replaces the Claude-driven analyze + segment +
- * classify stages with deterministic rule-based logic. Produces:
+ * classify stages with deterministic rule-based logic, tuned for SLEEP docs:
  *   - one scene per ~120s window of narration
- *   - shots of 5-12s each, packed at sentence boundaries
- *   - rotating camera moves so consecutive shots feel different
+ *   - ~10s "visual blocks" (multiple sentences share one held visual)
+ *   - CALM rotating camera moves only (slow drift / push / orbit; no handheld)
  *   - simple visualSummary derived from the narration itself
  *
- * Visual type assignment honors the IMAGE_RATIO quota (default 20% images /
- * 80% video clips). DEFAULT_VISUAL_TYPE seeds the non-image slots — set it to
- * `cinematic_video` (with DISABLE_VEO3=false) for Veo 3 hero shots, or leave
- * the default `atmospheric_broll` for cheap 69labs video b-roll.
+ * Visual type assignment runs through applyVisualQuota — the positional
+ * sequencer (clip/clip/still for the first 20 min, clip/still/still after). The
+ * sleep renderer freeze-pads any video clip shorter than its ~10s slot, so the
+ * clip/still mix stays in A/V sync.
  */
 import { eventsRepo, projectsRepo, scenesRepo, shotsRepo, transcriptsRepo } from '@emberforge/db';
-import { applyVisualQuota, packShots, quotaCounts, splitSentences, TARGET_IMAGE_RATIO } from '@emberforge/timeline-engine';
+import { applyVisualQuota, packByVisualBlock, quotaCounts, TARGET_IMAGE_RATIO } from '@emberforge/timeline-engine';
 import type { CameraMove, LensProfile, TransitionType, VisualType } from '@emberforge/core';
 
 const DEFAULT_VISUAL_TYPE: VisualType =
-  (process.env.DEFAULT_VISUAL_TYPE as VisualType | undefined) ?? 'atmospheric_broll';
+  (process.env.DEFAULT_VISUAL_TYPE as VisualType | undefined) ?? 'image_with_motion';
 const SCENE_TARGET_S = Number(process.env.SCENE_TARGET_S ?? 120);
-// Defaults aligned with 69labs Veo 3.1 Lite's ~5s clip ceiling. Override via
-// env if you pin a video model that supports longer durations.
-const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 3);
-const SHOT_MAX_S = Number(process.env.SHOT_MAX_S ?? 5);
-const SHOT_PREF_S = Number(process.env.SHOT_PREF_S ?? 5);
+// Sleep pacing: ~10s visual blocks. Stills hold any duration safely; if you
+// route video shots here, keep MAX at/under the video model's clip length.
+const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 8);
+const SHOT_MAX_S = Number(process.env.SHOT_MAX_S ?? 12);
+const SHOT_TARGET_S = Number(process.env.SHOT_TARGET_S ?? 10);
 
+// Calm-only moves. Slow drift (ken_burns), gentle push/pull (dolly), slow orbit,
+// and held static. NO handheld_drift / crane / whip / aerial / macro.
 const CAMERA_ROTATION: CameraMove[] = [
   'ken_burns_in',
+  'static',
   'dolly_in',
   'ken_burns_out',
   'orbit_left',
-  'handheld_drift',
   'dolly_out',
   'orbit_right',
-  'crane_up',
 ];
 
 const LENS_ROTATION: LensProfile[] = [
-  '35mm_anamorphic',
   '50mm_natural',
   '85mm_portrait',
-  '24mm_wide',
+  '35mm_anamorphic',
+  '135mm_tele',
 ];
 
-const TRANSITIONS: TransitionType[] = ['cut', 'cut', 'crossfade', 'cut', 'dip_to_black'];
+// Soothing dissolves only — never a hard cut.
+const TRANSITIONS: TransitionType[] = ['crossfade', 'dip_to_black', 'crossfade'];
 
 const MOOD_ROTATION = [
   'ambient_drone',
-  'tense_cello',
-  'wonder_choir',
-  'melancholic_piano',
-  'low_pulse',
+  'deep_low_hum',
+  'soft_pad_swell',
+  'near_silence',
 ];
 
 function pickRotating<T>(arr: T[], i: number): T {
@@ -75,11 +76,14 @@ export async function deterministicSegmentStage(projectId: string) {
     return { cached: true, scenes: existingScenes.length };
   }
 
-  const sentences = splitSentences(transcript.rawText);
-  if (sentences.length === 0) throw new Error('transcript produced zero sentences');
-
-  // Pack ALL sentences into shots first
-  const allShots = packShots(sentences, { minS: SHOT_MIN_S, maxS: SHOT_MAX_S, preferredS: SHOT_PREF_S });
+  // Pack the whole transcript into ~10s visual blocks (multiple sentences per
+  // held visual) instead of per-sentence ~5s clips.
+  const allShots = packByVisualBlock(transcript.rawText, {
+    minS: SHOT_MIN_S,
+    maxS: SHOT_MAX_S,
+    targetS: SHOT_TARGET_S,
+  });
+  if (allShots.length === 0) throw new Error('transcript produced zero shots');
 
   // Group shots into scenes by accumulated duration (~SCENE_TARGET_S each)
   type Bucket = { ordinal: number; shots: typeof allShots; durationS: number };
@@ -103,15 +107,15 @@ export async function deterministicSegmentStage(projectId: string) {
       title: `Scene ${b.ordinal + 1}`,
       narrationChunk: b.shots.map((s) => s.text).join(' '),
       emotion: 'contemplative',
-      pacing: 'medium',
-      atmosphere: 'cinematic atmospheric',
+      pacing: 'slow',
+      atmosphere: 'calm, dark, low-stimulation atmospheric',
       topic: 'narration',
       analysis: {
         topic: 'narration',
         emotion: 'contemplative',
-        pacing: 'medium',
-        tension: 0.4,
-        atmosphere: 'cinematic atmospheric',
+        pacing: 'slow',
+        tension: 0.2,
+        atmosphere: 'calm, dark, low-stimulation atmospheric',
         visualOpportunities: [],
         concepts: { scientific: [], abstract: [] },
       },
@@ -148,10 +152,10 @@ export async function deterministicSegmentStage(projectId: string) {
         cameraMovement: camera,
         lens,
         fxRecommendation: {
-          embers: 'medium',
+          embers: 'off',
           smoke: 'off',
           filmGrain: 0.08,
-          glow: 'low',
+          glow: 'off',
           vignette: 0.4,
         },
         transitionIn,

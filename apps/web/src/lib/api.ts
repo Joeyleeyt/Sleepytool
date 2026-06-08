@@ -1,11 +1,19 @@
 /**
- * Typed fetch wrappers for the EmberForge API. The API now lives in this
- * Next.js app under /api/v1/* (Route Handlers — see app/api/). Routes are
- * same-origin so no CORS / proxy plumbing is required.
+ * Typed fetch wrappers for the EmberForge API. The API lives in this Next.js app
+ * under /api/v1/* (Route Handlers — see app/api/).
+ *
+ * Base URL resolution handles both environments:
+ *   • Default '/api' — same-origin Route Handlers. Works unchanged in local dev
+ *     (`pnpm stack:dev`, web on :3000) AND in a standard production deploy where
+ *     the web app serves its own /api/* (no CORS/proxy plumbing needed).
+ *   • Override via NEXT_PUBLIC_API_BASE_URL when the API is on a SEPARATE origin
+ *     (e.g. a standalone API host in prod, or a local UI pointed at a remote
+ *     backend): set the full origin, e.g. "https://api.emberforge.app".
+ * NEXT_PUBLIC_* vars are inlined at build time, so set it before `next build`.
  */
 import type { ProjectStatus, VisualType, AssetKind } from '@emberforge/core';
 
-const BASE = '/api';
+const BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? '/api').replace(/\/+$/, '');
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   // Fastify's application/json parser rejects empty bodies with 400. For
@@ -17,7 +25,23 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     body: init?.body ?? (needsBody ? '{}' : undefined),
   };
-  const res = await fetch(`${BASE}${path}`, finalInit);
+  const url = `${BASE}${path}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, finalInit);
+  } catch (err) {
+    // fetch() rejects with a TypeError ("Failed to fetch") ONLY on a transport
+    // failure — the server is unreachable/not started, DNS/CORS blocked it, or
+    // it crashed mid-request. Turn that opaque message into an actionable one,
+    // tailored to the environment.
+    const isProd = process.env.NODE_ENV === 'production';
+    const hint = isProd
+      ? 'The API server is unreachable. Verify the service is up and NEXT_PUBLIC_API_BASE_URL points at it.'
+      : 'Is the dev stack running? Start it with `pnpm stack:dev`, then reload.';
+    throw new Error(`Cannot reach API at ${url}. ${hint} (${(err as Error).message})`);
+  }
+
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${text ? ': ' + text : ''}`);

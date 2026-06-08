@@ -101,5 +101,6 @@ export const STYLE_PRESETS = [
   'cosmic_minimal',
   'noir_documentary',
   'warm_archival',
+  'nocturne_soft', // sleep-documentary: dark, desaturated, soft-contrast, no embers
 ] as const;
 export type StylePresetId = (typeof STYLE_PRESETS)[number];

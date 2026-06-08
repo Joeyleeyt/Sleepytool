@@ -74,4 +74,14 @@ export const TranscriptAnalysisSchema = z.object({
   ),
   toneSummary: z.string(),
   estimatedDurationS: z.number().positive(),
+  // --- Sleep-documentary visual-world fields ---------------------------------
+  // All nullable+optional so legacy/labs-only projects (which skip analyze or
+  // predate these fields) still parse. Persisted inside transcripts.analysisJson
+  // and read back at prompt-build time — no dedicated DB columns required.
+  visualWorld: z.string().nullable().optional(),            // canonical world id, e.g. "deep_space"
+  allowedVisualDomains: z.array(z.string()).nullable().optional(),   // what MAY appear on screen
+  forbiddenVisualDomains: z.array(z.string()).nullable().optional(), // injected into the negative prompt
+  palette: z.string().nullable().optional(),                // e.g. "dark, low-saturation indigo and black"
+  movementStyle: z.string().nullable().optional(),          // e.g. "slow drift and gentle push-in only"
+  stimulationLevel: z.enum(['minimal', 'low', 'medium']).nullable().optional(),
 });

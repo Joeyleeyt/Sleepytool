@@ -9,6 +9,7 @@ export async function buildVeo3Prompt(opts: {
   projectId: string;
   stylePreset: StylePresetId;
   anchor?: string;
+  extraNegative?: string | null;
 }): Promise<{ prompt: string; negative: string }> {
   const palette = getPalette(opts.stylePreset);
   const memory = await recallMemory(opts.projectId, opts.shot);
@@ -28,6 +29,6 @@ export async function buildVeo3Prompt(opts: {
 
   return {
     prompt: parts.join(', '),
-    negative: palette.negative,
+    negative: [palette.negative, opts.extraNegative].filter(Boolean).join(', '),
   };
 }

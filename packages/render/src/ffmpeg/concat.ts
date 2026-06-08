@@ -9,7 +9,14 @@ import { ffmpeg } from './run.js';
 export async function concatDemuxer(inputs: string[], outPath: string): Promise<void> {
   const listPath = path.join(path.dirname(outPath), `concat_${Date.now()}.txt`);
   await mkdir(path.dirname(outPath), { recursive: true });
-  await writeFile(listPath, inputs.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n'));
+  // ffmpeg's concat demuxer resolves relative `file` entries against the LIST
+  // file's own directory, not the process cwd. Our inputs are cwd-relative
+  // (RENDER_WORK_DIR is often relative), so writing them verbatim doubles the
+  // path prefix. Resolve to absolute paths so the entries are unambiguous.
+  await writeFile(
+    listPath,
+    inputs.map((p) => `file '${path.resolve(p).replace(/'/g, "'\\''")}'`).join('\n'),
+  );
   await ffmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', outPath]);
 }
 

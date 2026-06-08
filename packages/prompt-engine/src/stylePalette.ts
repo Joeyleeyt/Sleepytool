@@ -3,6 +3,23 @@ import type { StylePresetId } from '@emberforge/core';
 const NEGATIVE_COMMON =
   'text, captions, subtitles, watermark, logo, brand name, on-screen UI, camera HUD, REC indicator, timestamp, date stamp, viewfinder overlay, focus reticle, film border, letterbox bars, frame markings, sprocket holes, cartoon, anime, low quality, blurry, oversaturated, deformed, plastic, AI artifacts, extra fingers';
 
+/**
+ * Off-world / off-niche negative baseline for sleep documentaries with a fixed
+ * visual world. The per-project `forbiddenVisualDomains` from the analyze step
+ * only lists intrusions the model happened to foresee — it can never enumerate
+ * every off-world object the narration might trigger (the classic failure being
+ * a literal prop like "a birth certificate" conjured from the word "birth").
+ *
+ * This baseline suppresses the whole CLASS of such intrusions: legible text and
+ * documents, charts/graphics, UI/screens, and — crucially — the "symbolic prop
+ * standing in for an abstract idea" pattern. Every item here is something that
+ * is NEVER a legitimate ambient sleep-world (space, ocean, forest, ruins…), so
+ * it is safe to add unconditionally without fighting any project's
+ * `allowedVisualDomains`. It is appended only when a world contract exists.
+ */
+export const OFF_WORLD_NEGATIVE =
+  'document, paper, certificate, form, page of text, legible writing, handwriting, charts, graphs, diagrams, infographic, numbers, equations, maps, calendar, clock face, computer screen, phone, tablet, app interface, icons, symbolic object, allegorical prop, literal metaphor, modern office, desk, still-life arrangement of objects';
+
 export interface StylePalette {
   grade: string;
   lighting: string;
@@ -47,6 +64,17 @@ export const PALETTES: Record<StylePresetId, StylePalette> = {
     lighting: 'soft window light, golden hour, gentle bounce',
     ambient: 'light leaks',
     negative: NEGATIVE_COMMON,
+    embersDefault: 'subtle',
+  },
+  // Sleep-documentary preset: dark, low-saturation, soft contrast, no vivid
+  // color, no harsh light. Pairs with the sleepy CLASSIFY prompt (embers off)
+  // and the sleep crossfade renderer. The extra negatives actively push the
+  // image models away from the bright, punchy look the other presets aim for.
+  nocturne_soft: {
+    grade: 'desaturated deep indigo and near-black, soft low contrast, muted cool tones, gentle bloom',
+    lighting: 'soft diffuse moonlight, low-key, deep gentle shadows, no harsh highlights',
+    ambient: 'soft haze, faint drifting particulate, dim distant glow',
+    negative: `${NEGATIVE_COMMON}, vivid colors, neon, high saturation, harsh lighting, high contrast, bright daylight, busy composition, fast motion`,
     embersDefault: 'subtle',
   },
 };

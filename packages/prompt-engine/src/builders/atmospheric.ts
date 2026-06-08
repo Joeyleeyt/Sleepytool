@@ -17,6 +17,7 @@ export async function buildAtmosphericPrompt(opts: {
   projectId: string;
   stylePreset: StylePresetId;
   anchor?: string;
+  extraNegative?: string | null;
 }): Promise<{ prompt: string; negative: string }> {
   const palette = getPalette(opts.stylePreset);
   const memory = await recallMemory(opts.projectId, opts.shot, {
@@ -35,5 +36,5 @@ export async function buildAtmosphericPrompt(opts: {
   ]
     .filter((x): x is string => Boolean(x))
     .join(', ');
-  return { prompt, negative: palette.negative };
+  return { prompt, negative: [palette.negative, opts.extraNegative].filter(Boolean).join(', ') };
 }

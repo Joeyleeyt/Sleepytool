@@ -7,7 +7,7 @@ export const projects = pgTable('projects', {
   ownerId: uuid('owner_id').notNull(),
   title: text('title').notNull(),
   status: projectStatusEnum('status').notNull().default('ingested'),
-  stylePreset: text('style_preset').notNull().default('cinematic_dark_ember'),
+  stylePreset: text('style_preset').notNull().default('nocturne_soft'),
   targetRes: text('target_res').notNull().default('3840x2160'),
   targetFps: integer('target_fps').notNull().default(30),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),

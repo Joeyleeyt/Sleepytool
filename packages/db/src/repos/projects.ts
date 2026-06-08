@@ -16,7 +16,10 @@ export const projectsRepo = {
       .values({
         ownerId: input.ownerId,
         title: input.title,
-        stylePreset: input.stylePreset ?? 'cinematic_dark_ember',
+        // Sleep-documentary product: default to the dark, low-saturation,
+        // soft-contrast sleep palette so a project created without an explicit
+        // preset is sleepy by default (the cinematic presets are now opt-in).
+        stylePreset: input.stylePreset ?? 'nocturne_soft',
         // 1920×1080 is YouTube's standard upload — fits a 16:9 player at full
         // HD and renders 3-4× faster than 4K. Bump to '3840x2160' per project
         // (via PATCH /projects/:id) for 4K masters.

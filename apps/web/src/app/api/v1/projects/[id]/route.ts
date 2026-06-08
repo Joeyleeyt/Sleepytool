@@ -1,13 +1,12 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { STYLE_PRESETS } from '@emberforge/core';
 import { eventsRepo, projectsRepo } from '@emberforge/db';
 import { parseJsonBody } from '@/lib/httpBody';
 import { reconcileAssetsReady, reconcileRenderPublished } from '@/lib/reconcile';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-
-const STYLE_PRESETS = ['cinematic_dark_ember', 'cosmic_minimal', 'noir_documentary', 'warm_archival'] as const;
 
 const ProjectPatchSchema = z.object({
   title: z.string().min(1).max(200).optional(),
