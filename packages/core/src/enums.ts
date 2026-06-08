@@ -104,3 +104,22 @@ export const STYLE_PRESETS = [
   'nocturne_soft', // sleep-documentary: dark, desaturated, soft-contrast, no embers
 ] as const;
 export type StylePresetId = (typeof STYLE_PRESETS)[number];
+
+// Sleep-documentary product default (see memory: sleep-doc-repurpose). Used to
+// fill in a missing preset and as the fallback for an unknown/legacy one.
+export const DEFAULT_STYLE_PRESET: StylePresetId = 'nocturne_soft';
+
+export function isStylePreset(value: unknown): value is StylePresetId {
+  return typeof value === 'string' && (STYLE_PRESETS as readonly string[]).includes(value);
+}
+
+/**
+ * Coerce any caller-supplied value into a known preset. Guarantees the DB never
+ * stores an unknown/legacy/null `stylePreset`, which would otherwise crash the
+ * prompt stage when it resolves the palette. The API routes already reject bad
+ * enums with a 400; this protects every other write path (seeds, scripts, the
+ * queue) and self-heals legacy rows on their next update.
+ */
+export function normalizeStylePreset(value: unknown): StylePresetId {
+  return isStylePreset(value) ? value : DEFAULT_STYLE_PRESET;
+}

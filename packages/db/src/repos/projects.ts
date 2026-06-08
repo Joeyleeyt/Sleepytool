@@ -1,5 +1,5 @@
 import { desc, eq } from 'drizzle-orm';
-import type { ProjectStatus } from '@emberforge/core';
+import { normalizeStylePreset, type ProjectStatus } from '@emberforge/core';
 import { db } from '../client.js';
 import { projects, transcripts } from '../schema/index.js';
 
@@ -19,7 +19,8 @@ export const projectsRepo = {
         // Sleep-documentary product: default to the dark, low-saturation,
         // soft-contrast sleep palette so a project created without an explicit
         // preset is sleepy by default (the cinematic presets are now opt-in).
-        stylePreset: input.stylePreset ?? 'nocturne_soft',
+        // normalize guards against any non-route caller passing an unknown value.
+        stylePreset: normalizeStylePreset(input.stylePreset),
         // 1920×1080 is YouTube's standard upload — fits a 16:9 player at full
         // HD and renders 3-4× faster than 4K. Bump to '3840x2160' per project
         // (via PATCH /projects/:id) for 4K masters.
@@ -57,9 +58,15 @@ export const projectsRepo = {
       targetFps?: 24 | 30 | 60;
     },
   ) {
+    // Normalize only when the caller is actually setting a preset; an absent
+    // key must be left untouched (don't overwrite the stored value with a default).
+    const normalized =
+      patch.stylePreset === undefined
+        ? patch
+        : { ...patch, stylePreset: normalizeStylePreset(patch.stylePreset) };
     const [row] = await db
       .update(projects)
-      .set({ ...patch, updatedAt: new Date() })
+      .set({ ...normalized, updatedAt: new Date() })
       .where(eq(projects.id, id))
       .returning();
     return row ?? null;

@@ -1,4 +1,4 @@
-import type { StylePresetId } from '@emberforge/core';
+import { DEFAULT_STYLE_PRESET, type StylePresetId } from '@emberforge/core';
 
 const NEGATIVE_COMMON =
   'text, captions, subtitles, watermark, logo, brand name, on-screen UI, camera HUD, REC indicator, timestamp, date stamp, viewfinder overlay, focus reticle, film border, letterbox bars, frame markings, sprocket holes, cartoon, anime, low quality, blurry, oversaturated, deformed, plastic, AI artifacts, extra fingers';
@@ -79,6 +79,9 @@ export const PALETTES: Record<StylePresetId, StylePalette> = {
   },
 };
 
+// Fall back to the product default when a project row carries an
+// unknown/legacy/null stylePreset — returning undefined here previously crashed
+// the prompt stage with "Cannot read properties of undefined (reading 'ambient')".
 export function getPalette(preset: StylePresetId): StylePalette {
-  return PALETTES[preset];
+  return PALETTES[preset] ?? PALETTES[DEFAULT_STYLE_PRESET];
 }
