@@ -42,8 +42,9 @@ export function getMotionMode(): MotionMode {
 // strongest cue for near-still generative video; every motion that models tend
 // to add anyway (walking, gestures, water, wind, swaying) is named and frozen
 // explicitly. Intensity 0.02–0.05 and drift < 0.3%/s push it as close to a
-// still as the model will go. (The render stage then slows the result a further
-// 4× via SLEEP_VIDEO_SLOWDOWN, so any residual motion is tamed downstream.)
+// still as the model will go. This is the SOLE source of slower-than-real-time
+// on-screen motion — the render stage keeps each clip at its ORIGINAL speed (no
+// setpts retiming), so the generated footage itself must carry the slowness.
 const SLEEP_MOTION =
   'a living photograph, a cinemagraph that is almost completely frozen, time is nearly stopped, ' +
   'extremely slow near-imperceptible motion, motion intensity 0.02 to 0.05, ' +

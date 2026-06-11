@@ -33,7 +33,6 @@ primary_region = 'lhr'
   SLEEP_CROSSFADE_DURATION = '3.5'          # dissolve within a scene (s) — longer = smoother
   SLEEP_SCENE_CROSSFADE_DURATION = '3.5'    # dissolve across scene boundaries (s)
   SLEEP_KENBURNS_MAX_ZOOM = '1.02'          # 2% push over a clip (imperceptible)
-  SLEEP_VIDEO_SLOWDOWN = '4'                # play AI video clips at 1/4 speed (dreamy slow motion)
 
   # --- Visual pacing (classify stage) ---
   # Each visual "block" runs longer so the picture holds still; short sentences

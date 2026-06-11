@@ -47,10 +47,6 @@ const SLEEP_SCENE_CROSSFADE_DURATION = Number(
 );
 // Ken Burns zoom ceiling for stills / frozen tails (1.02 = 2% push over a clip).
 const SLEEP_KENBURNS_MAX_ZOOM = Number(process.env.SLEEP_KENBURNS_MAX_ZOOM ?? '1.02');
-// Slow every AI video clip to 1/N speed for dreamy slow motion (4 = quarter
-// speed, the sleep default). Also reduces frozen tails: a slowed clip covers
-// N× more of its slot. Set to 1 to play clips at real speed.
-const SLEEP_VIDEO_SLOWDOWN = Number(process.env.SLEEP_VIDEO_SLOWDOWN ?? '4');
 
 /**
  * Sleep renderer permits a cross-dissolve only. Any flashy transition the
@@ -203,7 +199,6 @@ async function renderSleepMaster(args: {
       crossfadeS: SLEEP_CROSSFADE_DURATION,
       sceneCrossfadeS: SLEEP_SCENE_CROSSFADE_DURATION,
       maxZoom: SLEEP_KENBURNS_MAX_ZOOM,
-      videoSlowdown: SLEEP_VIDEO_SLOWDOWN,
       totalDurS: tl.totalDurationS,
     },
     '[composite] building sleep crossfade master',
@@ -217,7 +212,6 @@ async function renderSleepMaster(args: {
     fps: args.fps,
     nvenc: NVENC,
     maxZoom: SLEEP_KENBURNS_MAX_ZOOM,
-    videoSlowdown: SLEEP_VIDEO_SLOWDOWN,
     workDir: path.join(WORK_DIR, projectId, 'sleep'),
     concurrency: MIX_CONCURRENCY,
   });
