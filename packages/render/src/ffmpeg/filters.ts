@@ -176,9 +176,14 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
     //   CINEMATIC_OVERLAY_COLOR   warm 0xRRGGBB tint (default amber)
     //   CINEMATIC_EMBER_SPEED     rise speed (fraction/frame; bigger = faster)
     //   CINEMATIC_EMBER_AMOUNT    fraction of pixels lit (bigger = more embers)
+    //   CINEMATIC_EMBER_BLUR      glow radius (gblur sigma; smaller = smaller, tighter particles)
+    // Sleep defaults (client 6/11: "particles should be smaller and slower"):
+    // a slow rise (0.005) and a tight glow (sigma 0.8) so embers read as fine,
+    // drifting sparks rather than large fast blobs.
     const alpha = clamp(Number(process.env.CINEMATIC_OVERLAY_ALPHA ?? '0.6'), 0, 1);
-    const speed = clamp(Number(process.env.CINEMATIC_EMBER_SPEED ?? '0.012'), 0.0005, 0.2);
+    const speed = clamp(Number(process.env.CINEMATIC_EMBER_SPEED ?? '0.005'), 0.0005, 0.2);
     const amount = clamp(Number(process.env.CINEMATIC_EMBER_AMOUNT ?? '0.006'), 0.0005, 0.05);
+    const blur = clamp(Number(process.env.CINEMATIC_EMBER_BLUR ?? '0.8'), 0.2, 4);
     const thr = (1 - amount).toFixed(4);
     const { r, g, b } = colorMixRatios(process.env.CINEMATIC_OVERLAY_COLOR ?? '0xFF7A1E');
     const gw = roundEven(width / 4);
@@ -186,7 +191,7 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
     const sparkField =
       `color=c=black:s=${gw}x${gh}:d=1:r=${fps},format=gray,` +
       `geq=lum='if(gt(mod(abs(sin(X*12.9898+Y*78.233))*43758.545,1),${thr}),255,0)',` +
-      `loop=loop=-1:size=1,scroll=v=${speed},gblur=sigma=1.4,` +
+      `loop=loop=-1:size=1,scroll=v=${speed},gblur=sigma=${blur.toFixed(2)},` +
       `geq=lum='p(X,Y)*(0.16+0.84*(Y/H))',format=rgb24,` +
       `colorchannelmixer=rr=${r.toFixed(3)}:gg=${g.toFixed(3)}:bb=${b.toFixed(3)},` +
       `scale=${width}:${height},format=gbrp`;

@@ -39,14 +39,19 @@ const ShotVisualSchema = z.object({
 const ShotVisualListSchema = z.object({ shots: z.array(ShotVisualSchema) });
 type ShotVisual = z.infer<typeof ShotVisualSchema>;
 
-// Sleep-mode pacing: visuals are packed into ~10s "visual blocks" instead of
+// Sleep-mode pacing: visuals are packed into LONG "visual blocks" instead of
 // per-sentence ~3-5s shots. TARGET is the ideal block length, MAX the ceiling a
 // single visual may run, MIN the floor below which a block is folded into its
-// neighbor. Raising these is the primary lever for "approximately 10s per
-// visual" — the LLM never sets duration, packByVisualBlock does.
-const SHOT_TARGET_S = Number(process.env.SHOT_TARGET_S ?? 10);
-const SHOT_MAX_S = Number(process.env.SHOT_MAX_S ?? 12);
-const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 8);
+// neighbor. Raising these is the primary lever for longer-per-visual pacing —
+// the LLM never sets duration, packByVisualBlock does.
+//
+// Client ask (6/11): "shots split by the transcript are too short — each shot
+// should run over ~10s; if a sentence is shorter than ~10s, merge it with the
+// next." MIN=10 is that floor (a block never closes below it, so short sentences
+// keep merging forward); TARGET=12 is the typical length; MAX=16 the ceiling.
+const SHOT_TARGET_S = Number(process.env.SHOT_TARGET_S ?? 12);
+const SHOT_MAX_S = Number(process.env.SHOT_MAX_S ?? 16);
+const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 10);
 
 // Only these visual types have wired-up workers in safe-mode. Any other type
 // the LLM emits is downgraded to atmospheric_broll so the pipeline never hangs.

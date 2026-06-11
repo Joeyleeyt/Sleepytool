@@ -76,9 +76,9 @@ export function packByVisualBlock(
   text: string,
   opts: { minS?: number; maxS?: number; targetS?: number } = {},
 ): { text: string; durationS: number }[] {
-  const target = opts.targetS ?? 10;
-  const max = opts.maxS ?? 12;
-  const min = opts.minS ?? 8;
+  const target = opts.targetS ?? 12;
+  const max = opts.maxS ?? 16;
+  const min = opts.minS ?? 10;
   const sentences = splitSentences(text);
   const out: { text: string; durationS: number }[] = [];
 

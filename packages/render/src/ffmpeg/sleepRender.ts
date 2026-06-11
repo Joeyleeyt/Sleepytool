@@ -44,6 +44,14 @@ export interface BuildSleepMasterOpts {
   /** Ken Burns zoom ceiling for stills and frozen tails. 1.02 = a 2% push over
    *  the whole clip — keep it tiny; the goal is barely-perceptible drift. */
   maxZoom?: number;
+  /**
+   * Playback-speed divisor applied to every AI VIDEO clip (not stills) so the
+   * footage reads as dreamy slow motion. 4 = quarter speed (the sleep default):
+   * a clip's motion is stretched 4× and it covers 4× more of its slot, so fewer
+   * shots need a frozen tail. 1 = real speed. Stills are unaffected (their drift
+   * is the Ken Burns move, already sub-perceptual).
+   */
+  videoSlowdown?: number;
   /** Scratch dir for per-clip intermediates. Defaults to outPath's dir. */
   workDir?: string;
   /** How many clips to realise in parallel. Defaults to 4. */
@@ -51,6 +59,7 @@ export interface BuildSleepMasterOpts {
 }
 
 const DEFAULT_MAX_ZOOM = 1.02;
+const DEFAULT_VIDEO_SLOWDOWN = 4;
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.
 const FREEZE_EPSILON_S = 0.08;
@@ -134,20 +143,24 @@ async function prepStillSegment(
   await runWithNvencFallback(build, !!opts.nvenc);
 }
 
-/** Normalise a source video to target res/fps/yuv420p, silent, trimmed to
- *  `durationS` (the source's own motion is preserved — no Ken Burns). */
+/** Normalise a source video to target res/fps/yuv420p, silent, slowed to
+ *  `slowdown`× and trimmed to `durationS` of OUTPUT time. `setpts` stretches the
+ *  source's own motion into dreamy slow motion; the `-t` cut is applied to the
+ *  already-slowed stream, so `durationS` is real timeline seconds. */
 async function prepVideoSegment(
   src: string,
   durationS: number,
   opts: BuildSleepMasterOpts,
   outPath: string,
 ): Promise<void> {
-  const vf = `${coverScaleCrop(opts.width, opts.height, opts.fps)},format=yuv420p`;
+  const slowdown = opts.videoSlowdown ?? DEFAULT_VIDEO_SLOWDOWN;
+  const setpts = slowdown > 1 ? `setpts=${slowdown}*PTS,` : '';
+  const vf = `${setpts}${coverScaleCrop(opts.width, opts.height, opts.fps)},format=yuv420p`;
   const build = (nvenc: boolean): string[] => [
     '-y',
     '-i', src,
-    '-t', String(durationS),
     '-vf', vf,
+    '-t', String(durationS),
     '-r', String(opts.fps),
     ...intermediateEncodeArgs(nvenc),
     '-pix_fmt', 'yuv420p',
@@ -176,16 +189,21 @@ async function prepClip(clip: SleepClip, opts: BuildSleepMasterOpts, workDir: st
   }
 
   const srcDur = await ffprobeDuration(clip.sourcePath).catch(() => 0);
+  // Slowing the clip to 1/slowdown speed stretches its usable footage by the
+  // same factor, so a 5s clip at quarter speed covers a 20s slot. Decide cover
+  // vs. freeze-pad on this SLOWED length, not the raw source length.
+  const slowdown = opts.videoSlowdown ?? DEFAULT_VIDEO_SLOWDOWN;
+  const effectiveDur = Math.max(0, srcDur) * Math.max(1, slowdown);
 
-  // Source covers (≈) the whole slot — just trim.
-  if (srcDur >= target - FREEZE_EPSILON_S) {
+  // Slowed source covers (≈) the whole slot — just slow + trim.
+  if (effectiveDur >= target - FREEZE_EPSILON_S) {
     await prepVideoSegment(clip.sourcePath, target, opts, out);
     return out;
   }
 
-  // Source is shorter than the slot. Extend continuity by holding a frozen,
-  // slowly-drifting last frame until narration reaches the next clip.
-  const liveLen = Math.max(0, srcDur);
+  // Even slowed, the source is shorter than the slot. Play all of it (slowed),
+  // then hold a frozen, slowly-drifting last frame until the next clip.
+  const liveLen = effectiveDur;
   const padLen = target - liveLen;
   const stillImg = path.join(workDir, `${stem}_frame.png`);
   await extractLastFrame(clip.sourcePath, stillImg);

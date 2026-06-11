@@ -30,9 +30,23 @@ primary_region = 'lhr'
   # frozen slow-Ken-Burns last frame, narration stays authoritative. Set
   # SLEEP_RENDER='false' to fall back to the legacy hard-cut concat path.
   SLEEP_RENDER = 'true'
-  SLEEP_CROSSFADE_DURATION = '2.0'          # dissolve within a scene (s)
-  SLEEP_SCENE_CROSSFADE_DURATION = '2.0'    # dissolve across scene boundaries (s)
+  SLEEP_CROSSFADE_DURATION = '3.5'          # dissolve within a scene (s) — longer = smoother
+  SLEEP_SCENE_CROSSFADE_DURATION = '3.5'    # dissolve across scene boundaries (s)
   SLEEP_KENBURNS_MAX_ZOOM = '1.02'          # 2% push over a clip (imperceptible)
+  SLEEP_VIDEO_SLOWDOWN = '4'                # play AI video clips at 1/4 speed (dreamy slow motion)
+
+  # --- Visual pacing (classify stage) ---
+  # Each visual "block" runs longer so the picture holds still; short sentences
+  # merge forward until a block clears ~10s. MIN is the floor, TARGET the typical
+  # length, MAX the ceiling for a single visual.
+  SHOT_MIN_S = '10'
+  SHOT_TARGET_S = '12'
+  SHOT_MAX_S = '16'
+
+  # --- Rising-ember overlay (final encode) ---
+  # Smaller, slower sparks for the sleep look (see packages/render/.../filters.ts).
+  CINEMATIC_EMBER_SPEED = '0.005'           # rise speed (smaller = slower)
+  CINEMATIC_EMBER_BLUR = '0.8'              # glow radius (smaller = smaller particles)
 
 # Two process groups → two machines.
 #   workers — orchestrator + 69labs (labs/tts) + veo3 in ONE Node process.
