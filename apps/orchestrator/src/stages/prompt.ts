@@ -53,8 +53,15 @@ export async function promptStage(projectId: string) {
       toneSummary: analysis.toneSummary,
       atmosphere: atmosphereByScene.get(shot.sceneId) ?? null,
     });
-    const anchor = allowedDomains.length
-      ? `${baseAnchor}, strictly within the visual world${worldName ? ` of ${worldName}` : ''}: ${allowedDomains.join(', ')}`
+    // Name the world as a SHORT frame instead of dumping the whole
+    // allowedVisualDomains list into every prompt — the full list drowned each
+    // shot's own subject and made every shot read as the generic scenario rather
+    // than what THIS sentence is about. The no-escape guard now lives in the
+    // negative prompt (forbiddenDomains + OFF_WORLD_NEGATIVE) and in the
+    // classify stage re-casting each subject into the world, not in flooding the
+    // positive prompt with every allowed noun.
+    const anchor = hasWorldContract && worldName
+      ? `${baseAnchor}, set within the world of ${worldName}`
       : baseAnchor;
 
     // Visual prompt
@@ -145,8 +152,10 @@ function rowToShot(row: Awaited<ReturnType<typeof shotsRepo.findByProject>>[numb
     fxRecommendation: (row.fxRecommendation ?? {
       embers: 'medium', smoke: 'off', filmGrain: 0.08, glow: 'low', vignette: 0.4,
     }) as Shot['fxRecommendation'],
-    transitionIn: (row.transitionIn ?? 'cut') as Shot['transitionIn'],
-    transitionOut: (row.transitionOut ?? 'cut') as Shot['transitionOut'],
+    // Sleep-mode default: soft crossfades, never hard cuts (client feedback:
+    // "the transitions need to be smoother").
+    transitionIn: (row.transitionIn ?? 'crossfade') as Shot['transitionIn'],
+    transitionOut: (row.transitionOut ?? 'crossfade') as Shot['transitionOut'],
     soundtrackMood: row.soundtrackMood ?? 'ambient',
   };
 }

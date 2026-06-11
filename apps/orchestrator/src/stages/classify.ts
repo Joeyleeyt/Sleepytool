@@ -10,14 +10,21 @@ import { applyVisualQuota, packByVisualBlock, quotaCounts, TARGET_IMAGE_RATIO } 
 // ~10s "visual blocks" (see packByVisualBlock), so the LLM no longer splits the
 // narration — it only assigns the calm visual treatment for each pre-cut block.
 //
-// visualAnchor / continuityFromPrevious / movementIntensity / stimulationScore
-// are sleep-mode reasoning fields: they force the model to commit to ONE world
-// per shot, to relate each shot to the last, and to self-score its restfulness.
-// visualAnchor + continuity are folded into the persisted visualSummary so the
-// continuity actually reaches the image prompt; movement/stimulation are advisory.
+// subject / activity / location / mood are the per-shot composition fields: the
+// model derives them from THIS shot's narration but re-cast into the analyzed
+// world/era, so each shot tracks its own sentence (no off-world "old man") while
+// the subject VARIES shot-to-shot (anti-repetition / demonetization guard).
+// continuityFromPrevious / movementIntensity / stimulationScore are sleep-mode
+// reasoning fields. subject + activity + location + mood are folded into the
+// persisted visualSummary the image/video prompt is built from. visualAnchor is
+// kept optional for back-compat with older outputs.
 const ShotVisualSchema = z.object({
   visualType: z.enum(VISUAL_TYPES),
   visualSummary: z.string(),
+  subject: z.string().nullable().optional(),
+  activity: z.string().nullable().optional(),
+  location: z.string().nullable().optional(),
+  mood: z.string().nullable().optional(),
   visualAnchor: z.string().nullable().optional(),
   continuityFromPrevious: z.string().nullable().optional(),
   cameraMovement: z.enum(CAMERA_MOVES),
@@ -46,18 +53,26 @@ const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 8);
 const SUPPORTED_VISUAL_TYPES = new Set(['cinematic_video', 'image_with_motion', 'atmospheric_broll']);
 
 // Deterministic treatment used only when the LLM returns fewer visuals than
-// there are chunks (or fails entirely). Rotates the camera so consecutive
-// fallback shots still feel different.
+// there are chunks (or fails entirely). Rotates the camera AND the in-world
+// subject so consecutive fallback shots still feel different (anti-repetition),
+// and always uses a soft transition so cuts are never jarring.
 const FALLBACK_CAMERAS = ['ken_burns_in', 'dolly_in', 'orbit_left', 'ken_burns_out'] as const;
-function fallbackVisual(i: number, narration: string): ShotVisual {
+const FALLBACK_TRANSITIONS = ['crossfade', 'dip_to_black'] as const;
+function fallbackVisual(i: number, narration: string, world: WorldContract): ShotVisual {
+  // Rotate through the allowed world palette so back-to-back fallbacks don't
+  // collapse to one repeated view. Falls back to the scene narration summary.
+  const subject = world.allowed.length ? world.allowed[i % world.allowed.length]! : null;
   return {
     visualType: 'atmospheric_broll',
-    visualSummary: summarize(narration),
+    visualSummary: subject
+      ? `A slow, still, low-stimulation view of ${subject}${world.worldName ? ` within ${world.worldName}` : ''}, dark and quiet.`
+      : summarize(narration),
+    subject,
     cameraMovement: FALLBACK_CAMERAS[i % FALLBACK_CAMERAS.length]!,
     lens: '50mm_natural',
-    fxRecommendation: { embers: 'subtle', smoke: 'off', filmGrain: 0.08, glow: 'low', vignette: 0.4 },
-    transitionIn: 'cut',
-    transitionOut: 'cut',
+    fxRecommendation: { embers: 'off', smoke: 'off', filmGrain: 0.08, glow: 'low', vignette: 0.4 },
+    transitionIn: FALLBACK_TRANSITIONS[i % FALLBACK_TRANSITIONS.length]!,
+    transitionOut: FALLBACK_TRANSITIONS[(i + 1) % FALLBACK_TRANSITIONS.length]!,
     soundtrackMood: 'ambient_drone',
   };
 }
@@ -83,15 +98,21 @@ function containsAny(haystack: string, needles: string[]): boolean {
 
 // Deterministic backstop against the classify LLM drifting off-world (e.g.
 // illustrating a literal narration noun like "a birth certificate in a drawer"
-// for a deep-space film). A shot is off-world when its anchor/summary names a
-// FORBIDDEN domain, or — when an allow-list exists — names NONE of the allowed
-// world vocabulary. Such shots are rewritten to a generic, in-world ambient
+// for a deep-space film). A shot is off-world when its subject/anchor/summary
+// names a FORBIDDEN domain, or — when an allow-list exists — names NONE of the
+// allowed world vocabulary. Such shots are rewritten to an in-world ambient
 // view so a single bad LLM choice can never reach the image prompt. No-op when
 // the project has no world contract (allowed + forbidden both empty).
-function enforceWorld(v: ShotVisual, world: WorldContract): { anchor: string | null; summary: string } | null {
-  const anchor = v.visualAnchor ?? '';
-  const summary = v.visualSummary ?? '';
-  const text = `${anchor} ${summary}`;
+//
+// `idx` rotates the replacement subject through the allowed palette so that two
+// off-world shots in a row are NOT both collapsed to allowed[0] — that single
+// repeated view was the main source of "too much of the same footage".
+function enforceWorld(
+  v: ShotVisual,
+  world: WorldContract,
+  idx: number,
+): { subject: string; summary: string } | null {
+  const text = `${v.subject ?? ''} ${v.visualAnchor ?? ''} ${v.visualSummary ?? ''}`;
   const hitsForbidden = world.forbidden.length > 0 && containsAny(text, world.forbidden);
   // World vocabulary = the allowed domains plus the world name itself, so a
   // summary that says "deep space" instead of an exact domain word still passes.
@@ -101,13 +122,38 @@ function enforceWorld(v: ShotVisual, world: WorldContract): { anchor: string | n
   const inWorld = vocab.length === 0 ? true : containsAny(text, vocab);
   if (!hitsForbidden && inWorld) return null; // already in-world — keep as-is
 
-  const subject = world.allowed[0] ?? world.worldName ?? 'the surrounding world';
+  const subject = world.allowed.length
+    ? world.allowed[idx % world.allowed.length]!
+    : world.worldName ?? 'the surrounding world';
   return {
-    anchor: subject,
+    subject,
     summary:
       `A slow, still, low-stimulation ambient view of ${subject}` +
       `${world.worldName ? ` within ${world.worldName}` : ''}, dark, quiet and barely moving.`,
   };
+}
+
+// Compose the persisted visualSummary the image/video prompt is built from out
+// of the per-shot composition fields. Prefer the structured subject/activity/
+// location/mood (the new contract); fall back to the model's free-text
+// visualSummary, then to a summary of the narration. This is how each shot's own
+// sentence reaches generation while staying re-cast inside the world.
+function composeSummary(v: ShotVisual, fallbackNarration: string): string {
+  const subject = (v.subject ?? '').trim();
+  if (subject) {
+    const parts = [
+      subject,
+      (v.activity ?? '').trim(),
+      (v.location ?? '').trim(),
+    ].filter(Boolean);
+    const base = parts.join(', ');
+    const mood = (v.mood ?? '').trim();
+    const lead = mood ? `${mood}: ${base}` : base;
+    // Keep the model's richer sentence if it already elaborates on the subject.
+    const summary = (v.visualSummary ?? '').trim();
+    return summary && summary.toLowerCase().includes(subject.toLowerCase()) ? summary : lead;
+  }
+  return (v.visualSummary ?? '').trim() || summarize(fallbackNarration);
 }
 
 export async function classifyStage(projectId: string) {
@@ -196,23 +242,24 @@ export async function classifyStage(projectId: string) {
       );
 
       return chunks.map<Drafted>((c, i) => {
-        const v = visuals[i] ?? fallbackVisual(i, c.text);
+        const v = visuals[i] ?? fallbackVisual(i, c.text, world);
         // Deterministic guard: if the LLM drifted off-world (named a forbidden
-        // thing, or nothing from the allowed world), replace its anchor/summary
-        // with a generic in-world view before it can reach the image prompt.
-        const corrected = enforceWorld(v, world);
+        // thing, or nothing from the allowed world), replace its subject/summary
+        // with an in-world view before it can reach the image prompt. The
+        // replacement subject rotates by shot index so two corrected shots in a
+        // row don't collapse to the same repeated picture.
+        const corrected = enforceWorld(v, world, i);
         if (corrected) {
           // eslint-disable-next-line no-console
           console.warn(
-            `[classify] scene ${scene.ordinal} shot ${i} off-world anchor "${v.visualAnchor ?? v.visualSummary}" → "${corrected.anchor}"`,
+            `[classify] scene ${scene.ordinal} shot ${i} off-world subject "${v.subject ?? v.visualAnchor ?? v.visualSummary}" → "${corrected.subject}"`,
           );
         }
-        const anchor = corrected ? corrected.anchor : v.visualAnchor;
-        const summary = (corrected ? corrected.summary : v.visualSummary) || summarize(c.text);
-        // Prepend the per-shot visualAnchor so the chosen "world" is baked into
-        // the persisted summary the image/video prompt is built from — this is
-        // how continuityFromPrevious reasoning actually reaches generation.
-        const anchored = anchor ? `${anchor}; ${summary}` : summary;
+        // The persisted visualSummary the image/video prompt is built from. When
+        // corrected, use the rotated in-world view; otherwise compose it from the
+        // per-shot subject/activity/location/mood so each shot tracks its own
+        // sentence while staying inside the world.
+        const anchored = corrected ? corrected.summary : composeSummary(v, c.text);
         return {
           sceneId: scene.id,
           projectId,
