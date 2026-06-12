@@ -24,13 +24,14 @@ export async function promptStage(projectId: string) {
   const scenes = await scenesRepo.findByProject(projectId);
   const atmosphereByScene = new Map(scenes.map((s) => [s.id, s.atmosphere ?? null]));
 
-  // Sleep-mode visual-world guardrails. allowedVisualDomains is appended to the
-  // positive anchor so generation stays inside the niche; the negative prompt
-  // gets both the project-specific forbiddenVisualDomains AND the categorical
-  // OFF_WORLD_NEGATIVE baseline (documents, charts, symbolic props, UI…) so
-  // off-world intrusions the analyze step never foresaw — e.g. a "birth
-  // certificate" conjured from the word "birth" — are still suppressed. All
-  // no-ops when no world contract exists (legacy / labs-only projects).
+  // Sleep-mode visual-world guardrails. The positive prompt is NOT pinned to the
+  // world anymore — each shot's subject comes from its own transcript (see the
+  // classify stage). The world contract now only feeds the NEGATIVE prompt: the
+  // project-specific forbiddenVisualDomains AND the categorical OFF_WORLD_NEGATIVE
+  // baseline (documents, charts, symbolic props, UI…) so off-aesthetic intrusions
+  // the analyze step never foresaw are still suppressed. allowedVisualDomains is
+  // used only to detect whether a world contract exists. All no-ops when none
+  // exists (legacy / labs-only projects).
   const allowedDomains = (analysis.allowedVisualDomains ?? []).filter(Boolean);
   const forbiddenDomains = (analysis.forbiddenVisualDomains ?? []).filter(Boolean);
   const worldName = analysis.visualWorld ? analysis.visualWorld.replace(/_/g, ' ') : null;
@@ -53,16 +54,13 @@ export async function promptStage(projectId: string) {
       toneSummary: analysis.toneSummary,
       atmosphere: atmosphereByScene.get(shot.sceneId) ?? null,
     });
-    // Name the world as a SHORT frame instead of dumping the whole
-    // allowedVisualDomains list into every prompt — the full list drowned each
-    // shot's own subject and made every shot read as the generic scenario rather
-    // than what THIS sentence is about. The no-escape guard now lives in the
-    // negative prompt (forbiddenDomains + OFF_WORLD_NEGATIVE) and in the
-    // classify stage re-casting each subject into the world, not in flooding the
-    // positive prompt with every allowed noun.
-    const anchor = hasWorldContract && worldName
-      ? `${baseAnchor}, set within the world of ${worldName}`
-      : baseAnchor;
+    // Keep the anchor LIGHT: the shared world/mood cue only, with no per-shot
+    // "set within the world of X" pin. That pin re-anchored every shot to the
+    // generic scenario and narrowed the visual range; the shot's own
+    // transcript-derived subject leads the prompt instead. Off-aesthetic
+    // intrusions are still suppressed via the negative prompt (forbiddenDomains
+    // + OFF_WORLD_NEGATIVE) below.
+    const anchor = baseAnchor;
 
     // Visual prompt
     if (visualTarget) {

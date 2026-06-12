@@ -15,9 +15,11 @@ export async function buildImagePrompt(opts: {
   const palette = getPalette(opts.stylePreset);
   const memory = await recallMemory(opts.projectId, opts.shot);
 
+  // Lead with the shot's own transcript-derived subject so it carries the most
+  // weight, then the stillness directive.
   const parts = [
-    STILL_MOTION,
     opts.shot.visualSummary,
+    STILL_MOTION,
     memory && `featuring ${memory}`,
     opts.anchor,
     LENS_DESCRIPTION[opts.shot.lens],

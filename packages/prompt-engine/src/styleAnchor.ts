@@ -20,15 +20,15 @@ function clean(s: string): string {
 }
 
 export function buildStyleAnchor(input: StyleAnchorInput): string {
-  const world = input.globalTopic && clean(input.globalTopic);
-  const lead = world
-    ? `consistent cohesive visual world of ${world}`
-    : 'consistent cohesive visual world across the whole film';
-
-  const extra = [
+  // A LIGHT tone cue, not a heavy frame. The old "consistent cohesive visual
+  // world of X" lead pinned every shot to the generic scenario and flattened the
+  // range; here we just state the overall subject, scene atmosphere and mood so
+  // the look stays coherent while the shot's own transcript subject leads.
+  const parts = [
+    input.globalTopic && clean(input.globalTopic),
     input.atmosphere && clean(input.atmosphere),
     input.toneSummary && `overall mood ${clean(input.toneSummary)}`,
   ].filter((x): x is string => Boolean(x && x.length));
 
-  return [lead, ...extra].join(', ');
+  return parts.join(', ');
 }

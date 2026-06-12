@@ -21,7 +21,15 @@ import { applyVisualQuota, packByVisualBlock, quotaCounts, TARGET_IMAGE_RATIO } 
 const ShotVisualSchema = z.object({
   visualType: z.enum(VISUAL_TYPES),
   visualSummary: z.string(),
+  // The transcript keywords this shot's visual was built from. Not persisted —
+  // it forces the model to ground each subject in THIS sentence's own words
+  // (transcript-driven visuals) rather than inventing an off-theme stand-in.
+  keywords: z.array(z.string()).nullable().optional(),
   subject: z.string().nullable().optional(),
+  // Whether this shot's subject includes a person/people. Drives shot-type
+  // routing so people-subjects (the backbone of history/biography docs) never
+  // land on the people-free atmospheric_broll path. Transient — not persisted.
+  showsPeople: z.boolean().nullable().optional(),
   activity: z.string().nullable().optional(),
   location: z.string().nullable().optional(),
   mood: z.string().nullable().optional(),
@@ -58,21 +66,17 @@ const SHOT_MIN_S = Number(process.env.SHOT_MIN_S ?? 10);
 const SUPPORTED_VISUAL_TYPES = new Set(['cinematic_video', 'image_with_motion', 'atmospheric_broll']);
 
 // Deterministic treatment used only when the LLM returns fewer visuals than
-// there are chunks (or fails entirely). Rotates the camera AND the in-world
-// subject so consecutive fallback shots still feel different (anti-repetition),
-// and always uses a soft transition so cuts are never jarring.
+// there are chunks (or fails entirely). The visual is built straight from THIS
+// chunk's narration (transcript-driven), so the fallback still tracks what is
+// being said; the camera rotates so consecutive fallbacks feel different, and a
+// soft transition is always used so cuts are never jarring.
 const FALLBACK_CAMERAS = ['ken_burns_in', 'dolly_in', 'orbit_left', 'ken_burns_out'] as const;
 const FALLBACK_TRANSITIONS = ['crossfade', 'dip_to_black'] as const;
-function fallbackVisual(i: number, narration: string, world: WorldContract): ShotVisual {
-  // Rotate through the allowed world palette so back-to-back fallbacks don't
-  // collapse to one repeated view. Falls back to the scene narration summary.
-  const subject = world.allowed.length ? world.allowed[i % world.allowed.length]! : null;
+function fallbackVisual(i: number, narration: string): ShotVisual {
   return {
     visualType: 'atmospheric_broll',
-    visualSummary: subject
-      ? `A slow, still, low-stimulation view of ${subject}${world.worldName ? ` within ${world.worldName}` : ''}, dark and quiet.`
-      : summarize(narration),
-    subject,
+    visualSummary: summarize(narration),
+    subject: null,
     cameraMovement: FALLBACK_CAMERAS[i % FALLBACK_CAMERAS.length]!,
     lens: '50mm_natural',
     fxRecommendation: { embers: 'off', smoke: 'off', filmGrain: 0.08, glow: 'low', vignette: 0.4 },
@@ -101,40 +105,29 @@ function containsAny(haystack: string, needles: string[]): boolean {
   return needles.some((n) => n && h.includes(n.toLowerCase()));
 }
 
-// Deterministic backstop against the classify LLM drifting off-world (e.g.
-// illustrating a literal narration noun like "a birth certificate in a drawer"
-// for a deep-space film). A shot is off-world when its subject/anchor/summary
-// names a FORBIDDEN domain, or — when an allow-list exists — names NONE of the
-// allowed world vocabulary. Such shots are rewritten to an in-world ambient
-// view so a single bad LLM choice can never reach the image prompt. No-op when
-// the project has no world contract (allowed + forbidden both empty).
-//
-// `idx` rotates the replacement subject through the allowed palette so that two
-// off-world shots in a row are NOT both collapsed to allowed[0] — that single
-// repeated view was the main source of "too much of the same footage".
+// Deterministic backstop with a DELIBERATELY NARROW remit: it only fires when a
+// shot names a FORBIDDEN / off-aesthetic thing (on-screen text, UI, charts,
+// modern clutter — the generic, subject-independent ban list). It no longer
+// requires shots to match an allow-list: transcript-driven content that stays on
+// subject is kept verbatim, which is the whole point — the picture must follow
+// what the sentence actually says, not a fixed rotation palette. No-op when the
+// project has no forbidden list (labs-only / legacy projects).
 function enforceWorld(
   v: ShotVisual,
   world: WorldContract,
-  idx: number,
 ): { subject: string; summary: string } | null {
   const text = `${v.subject ?? ''} ${v.visualAnchor ?? ''} ${v.visualSummary ?? ''}`;
   const hitsForbidden = world.forbidden.length > 0 && containsAny(text, world.forbidden);
-  // World vocabulary = the allowed domains plus the world name itself, so a
-  // summary that says "deep space" instead of an exact domain word still passes.
-  const vocab = world.allowed.length
-    ? [...world.allowed, ...(world.worldName ? [world.worldName] : [])]
-    : [];
-  const inWorld = vocab.length === 0 ? true : containsAny(text, vocab);
-  if (!hitsForbidden && inWorld) return null; // already in-world — keep as-is
+  if (!hitsForbidden) return null; // on-subject, transcript-driven — keep as-is
 
-  const subject = world.allowed.length
-    ? world.allowed[idx % world.allowed.length]!
-    : world.worldName ?? 'the surrounding world';
+  // Names a banned off-aesthetic thing — replace with a neutral, in-subject
+  // ambient view so a single bad LLM choice can never reach the image prompt.
+  const subject = world.worldName ?? 'the surrounding scene';
   return {
     subject,
     summary:
-      `A slow, still, low-stimulation ambient view of ${subject}` +
-      `${world.worldName ? ` within ${world.worldName}` : ''}, dark, quiet and barely moving.`,
+      `A slow, still, low-stimulation ambient view${world.worldName ? ` of ${world.worldName}` : ''}, ` +
+      `dark, quiet and barely moving.`,
   };
 }
 
@@ -142,7 +135,7 @@ function enforceWorld(
 // of the per-shot composition fields. Prefer the structured subject/activity/
 // location/mood (the new contract); fall back to the model's free-text
 // visualSummary, then to a summary of the narration. This is how each shot's own
-// sentence reaches generation while staying re-cast inside the world.
+// sentence — its own transcript keywords — reaches generation.
 function composeSummary(v: ShotVisual, fallbackNarration: string): string {
   const subject = (v.subject ?? '').trim();
   if (subject) {
@@ -193,6 +186,9 @@ export async function classifyStage(projectId: string) {
   // Buffer all shots across scenes so the quota is enforced globally
   // (per-scene rebalancing would lose precision on short scenes).
   type Drafted = Parameters<typeof shotsRepo.bulkInsert>[0][number];
+  // Drafted + a transient showsPeople flag used only to drive shot-type routing
+  // in applyVisualQuota; stripped before the DB insert (no such column).
+  type DraftedWithPeople = Drafted & { showsPeople: boolean };
 
   // Scenes are independent until the global applyVisualQuota step — fan out
   // the per-scene LLM calls so wall-clock = slowest single call, not the sum.
@@ -219,8 +215,10 @@ export async function classifyStage(projectId: string) {
           model: 'haiku',
           system: CLASSIFY_SYSTEM,
           user: JSON.stringify({
-            // The hard niche boundary. Every visualAnchor must come from
-            // allowedVisualDomains; nothing from forbiddenVisualDomains.
+            // Soft hint only: visualWorld + allowedVisualDomains describe the
+            // film's overall subject/tone so shots stay coherent. The subject
+            // itself is drawn from each shot's narration, NOT cycled from this
+            // list. forbiddenVisualDomains remains a hard ban.
             world: {
               visualWorld: world.worldName,
               allowedVisualDomains: world.allowed,
@@ -246,14 +244,14 @@ export async function classifyStage(projectId: string) {
         `[classify] scene ${scene.ordinal} ok chunks=${chunks.length} visuals=${visuals.length} ${Date.now() - sceneStart}ms`,
       );
 
-      return chunks.map<Drafted>((c, i) => {
-        const v = visuals[i] ?? fallbackVisual(i, c.text, world);
-        // Deterministic guard: if the LLM drifted off-world (named a forbidden
-        // thing, or nothing from the allowed world), replace its subject/summary
-        // with an in-world view before it can reach the image prompt. The
-        // replacement subject rotates by shot index so two corrected shots in a
-        // row don't collapse to the same repeated picture.
-        const corrected = enforceWorld(v, world, i);
+      return chunks.map<DraftedWithPeople>((c, i) => {
+        const v = visuals[i] ?? fallbackVisual(i, c.text);
+        // Deterministic guard with a narrow remit: only if the LLM named a
+        // forbidden / off-aesthetic thing (text, UI, charts, modern clutter) is
+        // its subject/summary replaced with a neutral in-subject view before it
+        // can reach the image prompt. Transcript-driven, on-subject shots pass
+        // through untouched.
+        const corrected = enforceWorld(v, world);
         if (corrected) {
           // eslint-disable-next-line no-console
           console.warn(
@@ -279,19 +277,24 @@ export async function classifyStage(projectId: string) {
           transitionIn: v.transitionIn,
           transitionOut: v.transitionOut,
           soundtrackMood: v.soundtrackMood,
+          // A corrected (off-aesthetic) shot is forced to a neutral ambient view,
+          // which has no people; otherwise trust the LLM's people call.
+          showsPeople: corrected ? false : v.showsPeople ?? false,
         };
       });
     }),
   );
-  const drafted: Drafted[] = perScene.flat();
+  const drafted: DraftedWithPeople[] = perScene.flat();
 
+  // applyVisualQuota reads showsPeople so a people-subject is never routed to the
+  // people-free atmospheric_broll path (it goes to image_with_motion/cinematic).
   const rebalanced = applyVisualQuota(drafted);
   const counts = quotaCounts(rebalanced);
 
   // Re-group by scene so we can renumber ordinals per scene to satisfy the
   // shots_scene_ordinal_uq unique index, then flatten and issue ONE bulk
   // insert instead of N round-trips.
-  const bySceneId = new Map<string, Drafted[]>();
+  const bySceneId = new Map<string, DraftedWithPeople[]>();
   for (const row of rebalanced) {
     const arr = bySceneId.get(row.sceneId) ?? [];
     arr.push(row);
@@ -301,8 +304,11 @@ export async function classifyStage(projectId: string) {
   for (const scene of scenes) {
     const rows = bySceneId.get(scene.id);
     if (!rows || !rows.length) continue;
-    rows.forEach((row, i) => { row.ordinal = i; });
-    allRows.push(...rows);
+    // Strip the transient showsPeople before insert (no such column).
+    rows.forEach((row, i) => {
+      const { showsPeople: _showsPeople, ...rest } = row;
+      allRows.push({ ...rest, ordinal: i });
+    });
   }
   if (allRows.length > 0) await shotsRepo.bulkInsert(allRows);
 

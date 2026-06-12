@@ -39,21 +39,25 @@ export function getMotionMode(): MotionMode {
 // 69labs exposes no motion-intensity knob and DROPS the negative prompt for
 // video, so the only lever on how much the clip moves is this positive text. The
 // "living photograph / cinemagraph, time almost stopped" framing is the single
-// strongest cue for near-still generative video; every motion that models tend
-// to add anyway (walking, gestures, water, wind, swaying) is named and frozen
-// explicitly. Intensity 0.02–0.05 and drift < 0.3%/s push it as close to a
-// still as the model will go. This is the SOLE source of slower-than-real-time
-// on-screen motion — the render stage keeps each clip at its ORIGINAL speed (no
-// setpts retiming), so the generated footage itself must carry the slowness.
+// strongest cue for near-still generative video.
+//
+// OBJECT-AGNOSTIC ON PURPOSE: transcripts span any subject, so the directive
+// must NOT name specific things (candles, embers, animals, water, particles) —
+// naming them would imply objects a given shot may not contain. Instead it
+// freezes WHATEVER appears: "every element in the frame, whatever it is". This
+// is the SOLE source of slower-than-real-time on-screen motion — the render
+// stage keeps each clip at its ORIGINAL speed (no setpts retiming), so the
+// generated footage itself must carry the slowness. Intensity 0.01–0.03 and
+// drift < 0.15%/s push it as close to a still as the model will go.
 const SLEEP_MOTION =
   'a living photograph, a cinemagraph that is almost completely frozen, time is nearly stopped, ' +
-  'extremely slow near-imperceptible motion, motion intensity 0.02 to 0.05, ' +
-  'every person, animal and object is held still and frozen in place, ' +
-  'no walking, no gestures, no moving limbs, no flowing or rippling water, ' +
-  'no blowing wind, no rustling leaves, no swaying, no falling or drifting particles, ' +
-  'only the faintest barely-perceptible drift, ' +
+  'extremely slow near-imperceptible motion, motion intensity 0.01 to 0.03, ' +
+  'every element in the frame, whatever it is, is held almost perfectly still and frozen in place, ' +
+  'all motion of any kind — of any subject, object, surface, light or detail — is reduced to ' +
+  'the faintest barely-perceptible drift, nothing moves quickly, nothing darts, flickers or flutters, ' +
+  'everything settles into deep near-stillness, only the slightest hint of life remains, ' +
   'camera locked-off or micro-dolly only, no parallax, no zoom, ' +
-  'any drift slower than 0.3% per second, ' +
+  'any drift slower than 0.15% per second, ' +
   'one single continuous uninterrupted shot, no cuts or transitions inside the shot, ' +
   'the frame is held almost perfectly static, ' +
   'no camera shake, no motion blur, no fast or sudden movement';
@@ -81,7 +85,7 @@ export function motionDirective(mode: MotionMode = getMotionMode()): string {
 // motionDirective() repeats the constraint in detail later in the prompt.
 const SLEEP_LEAD =
   'a near-frozen living photograph, an almost completely still cinemagraph, time nearly stopped, ' +
-  'no perceptible movement, calm and motionless';
+  'everything in the frame held nearly motionless, no perceptible movement, calm and still';
 const DREAM_LEAD = 'slow, gently drifting footage, minimal movement, calm and tranquil';
 
 /** Short, front-of-prompt motion lead for VIDEO prompts. Reflects MOTION_MODE. */
@@ -110,5 +114,4 @@ export const MOTION_NEGATIVE =
   'scene change mid-shot, flashing, strobing, shaky camera, camera shake, handheld jitter, ' +
   'motion blur, speed ramp, time-lapse, hyperlapse, fast-moving objects, energetic action, ' +
   'dynamic motion, swirling, spinning, frenetic, chaotic movement, ' +
-  'walking people, moving limbs, gestures, flowing water, rippling water, blowing wind, ' +
-  'rustling leaves, swaying, drifting particles, busy motion';
+  'any quick or lively movement of any subject or object, flickering, fluttering, busy motion';

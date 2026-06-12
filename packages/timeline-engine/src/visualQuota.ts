@@ -47,12 +47,19 @@ function durationOf(shot: { durationS: string | number }): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function assignType<T extends { visualType: VisualType }>(shot: T, isImage: boolean): T {
+function assignType<T extends { visualType: VisualType; showsPeople?: boolean }>(shot: T, isImage: boolean): T {
   if (isImage) {
+    // image_with_motion renders people fine — safe for any subject.
     return shot.visualType === IMAGE_TYPE ? shot : { ...shot, visualType: IMAGE_TYPE };
   }
-  // Clip slot: preserve an explicit hero-video pick, otherwise normalize to
-  // cheap atmospheric b-roll.
+  // Clip slot. A shot that shows people must NOT become atmospheric_broll: that
+  // builder injects "no people" and would strip the subject out. Route it to the
+  // people-safe cinematic_video path instead (history/biography backbone).
+  if (shot.showsPeople) {
+    return shot.visualType === 'cinematic_video' ? shot : { ...shot, visualType: 'cinematic_video' };
+  }
+  // People-free clip slot: preserve an explicit hero-video pick, otherwise
+  // normalize to cheap atmospheric b-roll.
   if (shot.visualType === 'cinematic_video' || shot.visualType === 'atmospheric_broll') {
     return shot;
   }
@@ -63,7 +70,7 @@ function assignType<T extends { visualType: VisualType }>(shot: T, isImage: bool
  * Assign each shot's visual type by its timeline position. Input MUST be in
  * timeline order; output preserves that order 1:1.
  */
-export function applyVisualQuota<T extends { visualType: VisualType; durationS: string | number }>(
+export function applyVisualQuota<T extends { visualType: VisualType; durationS: string | number; showsPeople?: boolean }>(
   shots: T[],
 ): T[] {
   if (shots.length === 0) return shots;

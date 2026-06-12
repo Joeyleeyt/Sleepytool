@@ -24,9 +24,11 @@ export async function buildAtmosphericPrompt(opts: {
   const memory = await recallMemory(opts.projectId, opts.shot, {
     kinds: ['environment', 'palette', 'style_token'],
   });
+  // Lead with the shot's own transcript-derived subject so it carries the most
+  // weight, then the stillness lead. The motion directive repeats mid-prompt.
   const prompt = [
-    motionLead(),
     opts.shot.visualSummary || 'atmospheric environmental footage',
+    motionLead(),
     memory && `set in ${memory}`,
     opts.anchor,
     'no people',

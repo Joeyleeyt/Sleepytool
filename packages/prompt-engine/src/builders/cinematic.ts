@@ -15,9 +15,11 @@ export async function buildVeo3Prompt(opts: {
   const palette = getPalette(opts.stylePreset);
   const memory = await recallMemory(opts.projectId, opts.shot);
 
+  // Lead with the shot's own transcript-derived subject so it carries the most
+  // weight, then the stillness lead. The motion directive repeats mid-prompt.
   const parts: string[] = [
-    motionLead(),
     opts.shot.visualSummary,
+    motionLead(),
     memory && `featuring ${memory}`,
     opts.anchor,
     LENS_DESCRIPTION[opts.shot.lens],
