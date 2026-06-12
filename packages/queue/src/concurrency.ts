@@ -62,6 +62,40 @@ function mkToken(provider: string): string {
 }
 
 /**
+ * One non-blocking attempt: claim a slot for `provider` if the pool is under
+ * `max`, returning a handle whose `release()` frees it — or `null` if it's
+ * already full. This is the atomic core that {@link acquireSlot} polls; expose
+ * it directly when a caller wants to race a slot across several pools (e.g. one
+ * pool per API key) instead of blocking on a single one.
+ */
+export async function tryAcquireSlot(
+  provider: string,
+  max: number,
+  opts: { leaseMs?: number } = {},
+): Promise<Slot | null> {
+  const leaseMs = opts.leaseMs ?? DEFAULT_LEASE_MS;
+  const key = `cc:${provider}`;
+  const token = mkToken(provider);
+  const ok = (await connection.eval(
+    ACQUIRE_LUA,
+    1,
+    key,
+    String(Date.now()),
+    String(max),
+    token,
+    String(Date.now() + leaseMs),
+  )) as number;
+  if (ok !== 1) return null;
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    await connection.zrem(key, token).catch(() => {});
+  };
+  return { release };
+}
+
+/**
  * Block until a concurrency slot for `provider` is free (at most `max` held at
  * once across all workers), then return a handle whose `release()` frees it.
  *
@@ -74,28 +108,11 @@ export async function acquireSlot(
   max: number,
   opts: { leaseMs?: number; signal?: AbortSignal } = {},
 ): Promise<Slot> {
-  const leaseMs = opts.leaseMs ?? DEFAULT_LEASE_MS;
-  const key = `cc:${provider}`;
-  const token = mkToken(provider);
-  let released = false;
-  const release = async () => {
-    if (released) return;
-    released = true;
-    await connection.zrem(key, token).catch(() => {});
-  };
   // eslint-disable-next-line no-constant-condition
   while (true) {
     if (opts.signal?.aborted) throw new Error(`acquireSlot(${provider}) aborted`);
-    const ok = (await connection.eval(
-      ACQUIRE_LUA,
-      1,
-      key,
-      String(Date.now()),
-      String(max),
-      token,
-      String(Date.now() + leaseMs),
-    )) as number;
-    if (ok === 1) return { release };
+    const slot = await tryAcquireSlot(provider, max, { leaseMs: opts.leaseMs });
+    if (slot) return slot;
     await sleep(POLL_MS + Math.floor(Math.random() * POLL_JITTER_MS));
   }
 }

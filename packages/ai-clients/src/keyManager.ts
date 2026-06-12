@@ -110,3 +110,123 @@ function serializeError(err: unknown): Record<string, unknown> {
   const e = err as ProviderError;
   return { message: e?.message ?? String(err), status: e?.status, at: new Date().toISOString() };
 }
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Slot handle — structurally compatible with the queue package's `Slot`. */
+export interface KeySlot {
+  release: () => Promise<void>;
+}
+
+export interface WithKeySlotOptions {
+  /**
+   * Max concurrent jobs allowed PER KEY (the provider's per-account in-flight
+   * cap, e.g. 2 for 69labs). Each active key gets its own pool of this size, so
+   * N keys run up to N×perKeyMax jobs at once.
+   */
+  perKeyMax: number;
+  /** Crash-safety lease for a held slot (must exceed one job's full span). */
+  leaseMs: number;
+  /**
+   * Non-blocking slot claim, injected by the caller (Redis-backed in prod):
+   * returns a handle if a slot under `slotKey` is free (pool cap `max`), else
+   * null. Keeps this module decoupled from the queue/Redis layer.
+   */
+  tryAcquireSlot: (slotKey: string, max: number, opts: { leaseMs: number }) => Promise<KeySlot | null>;
+  /** Build a key's slot-pool name, e.g. `id => '69labs.image:' + id`. */
+  slotKeyFor: (keyId: string) => string;
+  /** Legacy env key to run (on its own pool) until the api_keys table is set up. */
+  fallbackKey?: string;
+  /** How long to wait before re-checking when every key is at capacity. */
+  pollMs?: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Like {@link withProviderKey}, but DISTRIBUTES load across all active keys
+ * instead of funnelling every job through key #1.
+ *
+ * Each key gets its own concurrency pool of `perKeyMax` slots. A job grabs the
+ * first key with a free slot, so two keys with perKeyMax=2 run 4 jobs at once
+ * (2 per account) with no speculative `403 Concurrent limit` round-trips. When
+ * every key is at capacity it waits for a slot to free; failover (disable a
+ * dead key / rotate past a transient error / rethrow a content failure) matches
+ * `withProviderKey` exactly. Total throughput is dynamic: it tracks the number
+ * of *active* keys, so a disabled key simply drops capacity by perKeyMax.
+ *
+ *   const result = await withKeySlot('69labs', (apiKey) => labs69.image({ ...input, apiKey }), {
+ *     perKeyMax: 2, leaseMs: 12 * 60_000, tryAcquireSlot,
+ *     slotKeyFor: (id) => `69labs.image:${id}`, fallbackKey: process.env.LABS69_API_KEY,
+ *   });
+ *
+ * `fn` also receives the chosen key's id (the db row id, or `'legacy'` for the
+ * env fallback) so callers can apply per-key throttling — e.g. an hourly quota
+ * bucket scoped to that key.
+ */
+export async function withKeySlot<T>(
+  provider: string,
+  fn: (apiKey: string, keyId: string) => Promise<T>,
+  opts: WithKeySlotOptions,
+): Promise<T> {
+  const { perKeyMax, leaseMs, tryAcquireSlot, slotKeyFor, pollMs = 500, signal } = opts;
+  const wait = () => sleep(pollMs + Math.floor(Math.random() * 150));
+  // Keys we've already tried and that failed in THIS call — don't re-run them.
+  const triedFailed = new Set<string>();
+  let lastErr: unknown;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (signal?.aborted) throw new Error(`withKeySlot(${provider}) aborted`);
+    const keys = await apiKeysRepo.listActive(provider);
+
+    if (keys.length === 0) {
+      // Table not populated yet → run the legacy env key on its own slot pool.
+      const fallback = opts.fallbackKey?.trim();
+      if (!fallback) throw new NoKeyAvailableError(provider);
+      const slot = await tryAcquireSlot(slotKeyFor('legacy'), perKeyMax, { leaseMs });
+      if (!slot) {
+        await wait();
+        continue;
+      }
+      try {
+        return await fn(fallback, 'legacy');
+      } finally {
+        await slot.release();
+      }
+    }
+
+    const candidates = keys.filter((k) => !triedFailed.has(k.id));
+    // Every active key was tried and failed here — surface the real cause.
+    if (candidates.length === 0) throw lastErr ?? new NoKeyAvailableError(provider);
+
+    let gotSlot = false;
+    for (const key of candidates) {
+      const slot = await tryAcquireSlot(slotKeyFor(key.id), perKeyMax, { leaseMs });
+      if (!slot) continue; // this key is at capacity — try another
+      gotSlot = true;
+      const apiKey = apiKeysRepo.decrypt(key.encryptedApiKey);
+      try {
+        const result = await fn(apiKey, key.id);
+        void apiKeysRepo.markUsed(key.id).catch(() => {});
+        return result;
+      } catch (err) {
+        lastErr = err;
+        const { action, reason } = actionFor(err);
+        if (action === 'disable') {
+          void apiKeysRepo.disable(key.id, reason ?? 'auto', serializeError(err)).catch(() => {});
+        }
+        if (action === 'rethrow') throw err;
+        // 'disable' and 'rotate' both fall through: don't reuse this key here.
+        triedFailed.add(key.id);
+      } finally {
+        await slot.release();
+      }
+      // After a failure, re-list from the top (the key may now be disabled) and
+      // pick another — break the per-key scan so candidates get recomputed.
+      break;
+    }
+
+    // Every candidate key is busy (no free slot) — wait, then re-check.
+    if (!gotSlot) await wait();
+  }
+}

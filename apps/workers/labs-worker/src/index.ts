@@ -3,20 +3,25 @@ import path from 'node:path';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { Worker, type Job } from 'bullmq';
 import pino from 'pino';
-import { acquire, acquireSlot, connection } from '@emberforge/queue';
+import { acquire, tryAcquireSlot, connection } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
-import { labs69, withProviderKey } from '@emberforge/ai-clients';
+import { labs69, withKeySlot } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
 
 const log = pino({ name: 'labs-worker' });
 
-// 69labs caps CONCURRENT in-flight jobs per tier+job-type (separate from the
+// 69labs caps CONCURRENT in-flight jobs PER ACCOUNT/key (separate from the
 // req/min rate limit). Exceeding it returns `403 Concurrent ... limit reached`.
-// We gate submits through a distributed semaphore so any number of prompts can
-// be enqueued at once and they pipeline through at most N concurrent jobs.
-// Defaults to the plan's cap (4); override per-kind via env.
-const IMAGE_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_MAX_CONCURRENCY ?? 4));
-const VIDEO_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_MAX_CONCURRENCY ?? 4));
+// `withKeySlot` gives every active key its own pool of PER_KEY_MAX slots and
+// spreads jobs across keys, so two keys run 2×PER_KEY_MAX jobs per feature at
+// once (e.g. 2 keys × 2 = 4) instead of funnelling everything through key #1.
+const PER_KEY_MAX = Math.max(1, Number(process.env.LABS69_PER_KEY_CONCURRENCY ?? 2));
+// Expected active-key count — only sizes each worker's BullMQ pull cap so
+// enough jobs are in hand to fill every key's slots. The real limiter is the
+// per-key slot pool; bump this when you add more keys. Per-kind env still wins.
+const MAX_KEYS = Math.max(1, Number(process.env.LABS69_MAX_KEYS ?? 2));
+const IMAGE_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_MAX_CONCURRENCY ?? MAX_KEYS * PER_KEY_MAX));
+const VIDEO_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_MAX_CONCURRENCY ?? MAX_KEYS * PER_KEY_MAX));
 
 // Provider job ids currently in flight (id -> URL segment), so we can cancel
 // them on shutdown instead of orphaning them — orphaned jobs keep occupying a
@@ -70,13 +75,9 @@ async function processShot(job: Job) {
     status: 'queued',
   });
 
-  // Hold a concurrency slot for the whole submit→poll→download span so we
-  // never exceed the 69labs concurrent-job cap. Blocks here until a slot is
-  // free; the lease is reclaimed automatically if this worker crashes.
-  phase('WORKER', 'waiting_slot');
-  const slot = await acquireSlot(target, kind === 'image' ? IMAGE_MAX : VIDEO_MAX, {
-    leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
-  });
+  // The per-key concurrency slot is acquired INSIDE withKeySlot below (one pool
+  // per key, so we can run a job on whichever key has a free slot) and released
+  // the moment the provider job completes — download/upload happen off-slot.
   // Persist the provider job id the instant it's known so a mid-poll crash
   // leaves a reapable record, and track it for shutdown cancellation. 69labs
   // can re-queue a generation under a NEW id mid-poll; we track every id this
@@ -115,17 +116,31 @@ async function processShot(job: Job) {
     await generationsRepo.markStarted(generation.id);
     const t0 = Date.now();
 
+    phase('WORKER', 'waiting_slot');
+    // Run the whole submit→poll→download on whichever active key has a free slot
+    // (one pool of PER_KEY_MAX per key), so two keys generate in parallel. Blocks
+    // here until some key has a free slot; the lease is auto-reclaimed if this
+    // worker crashes, and it's released the moment the provider job completes so
+    // the download/upload below happen off-slot. On a key-attributable failure
+    // (bad key, 402 no-credits, 429) withKeySlot rotates to another key and
+    // re-runs this whole function — a fresh job under the new account — instead
+    // of failing the shot. Content failures (CENSORED) are rethrown immediately
+    // so we don't burn the pool on a doomed prompt. The provider job id changes
+    // on a rotation; onSubmit/onJobId keep our tracking pointed at the live job.
     phase('WORKER', 'submitting');
-    // Pick a healthy 69labs key from the pool and run the whole
-    // submit→poll→download under it. On a key-attributable failure (bad key,
-    // 402 no-credits, 429) withProviderKey rotates to another key and re-runs
-    // this whole function — a fresh job under the new account — instead of
-    // failing the shot. Content failures (CENSORED) are rethrown immediately so
-    // we don't burn the pool on a doomed prompt. The provider job id changes on
-    // a rotation; onSubmit/onJobId keep our tracking pointed at the live job.
-    const result = await withProviderKey('69labs', (apiKey) =>
-      kind === 'image'
-        ? labs69.image({
+    const result = await withKeySlot(
+      '69labs',
+      async (apiKey, keyId) => {
+        // Per-key hourly quota: 69labs allows 100 images / 40 videos per hour
+        // PER KEY, and with concurrency=2 that's the BINDING cap (sustained
+        // generation would otherwise exceed it). Charge one token to THIS key's
+        // hourly bucket before submitting; blocks here if the key has spent its
+        // hour. Bucketed per key, so two keys give 200/80 an hour and a disabled
+        // key only drops its own share. (Held under the key's concurrency slot —
+        // fine: other jobs on a spent key would be hour-blocked too.)
+        await acquire(`${target}.hourly`, 1, `${target}.hourly:${keyId}`);
+        return kind === 'image'
+          ? labs69.image({
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
             onStatus,
@@ -139,7 +154,7 @@ async function processShot(job: Job) {
             onJobId,
             apiKey,
           })
-        : labs69.video({
+          : labs69.video({
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
             durationS: Number(shot.durationS),
@@ -151,10 +166,18 @@ async function processShot(job: Job) {
             onJobId,
             onStatus,
             apiKey,
-          }),
-      // Until the api_keys table is populated, fall back to the legacy env key
-      // so labs jobs keep working exactly as before (safe incremental rollout).
-      { fallbackKey: process.env.LABS69_API_KEY },
+          });
+      },
+      {
+        perKeyMax: PER_KEY_MAX,
+        leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
+        // Redis-backed slot pools, one per key: `cc:69labs.image:<keyId>`.
+        tryAcquireSlot,
+        slotKeyFor: (keyId) => `${target}:${keyId}`,
+        // Until the api_keys table is populated, fall back to the legacy env key
+        // so labs jobs keep working exactly as before (safe incremental rollout).
+        fallbackKey: process.env.LABS69_API_KEY,
+      },
     );
 
     // Back in the worker: COMPLETED at 69labs, now pulling + storing the bytes.
@@ -203,18 +226,19 @@ async function processShot(job: Job) {
   } finally {
     // labs69.image/video already cancels the provider job(s) on failure, so by
     // here they're either done or cancelled — drop every id this shot lived
-    // under from the in-flight set and free the concurrency slot.
+    // under from the in-flight set. The per-key concurrency slot was already
+    // released inside withKeySlot when the provider job completed.
     for (const id of myJobIds) inflight.delete(id);
-    await slot.release();
   }
 }
 
 // Two independent workers, one per 69labs feature, so image and video generate
 // on separate tracks: a backlog of slow video jobs can never head-of-line block
-// image jobs (or vice versa). Each worker's BullMQ concurrency matches its
-// per-kind slot cap — `acquireSlot` is the real cross-process limit, so pulling
-// more jobs than free slots would only park them holding a BullMQ lock. Each
-// active job buffers one download in memory, so peak RAM ~= IMAGE_MAX + VIDEO_MAX.
+// image jobs (or vice versa). BullMQ concurrency is just the PULL cap (≈ keys ×
+// per-key slots) so enough jobs are in hand to fill every key's pool — the real
+// cross-process limit is the per-key slot pools inside withKeySlot. Jobs pulled
+// beyond free slots park in withKeySlot's wait loop holding only a BullMQ lock
+// (no download buffer until a slot opens), so peak RAM ~= IMAGE_MAX + VIDEO_MAX.
 new Worker('labsImage', processShot, { connection, concurrency: IMAGE_MAX });
 new Worker('labsVideo', processShot, { connection, concurrency: VIDEO_MAX });
 
@@ -238,4 +262,7 @@ async function shutdown(signal: string) {
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
-log.info({ imageMax: IMAGE_MAX, videoMax: VIDEO_MAX }, 'labs-worker started (labsImage + labsVideo)');
+log.info(
+  { perKeyMax: PER_KEY_MAX, maxKeys: MAX_KEYS, imagePull: IMAGE_MAX, videoPull: VIDEO_MAX },
+  'labs-worker started (labsImage + labsVideo) — per-key slot pools',
+);
