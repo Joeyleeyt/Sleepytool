@@ -119,6 +119,68 @@ export function packByVisualBlock(
 }
 
 /**
+ * Pack narration into LONG "scene" chunks — the deterministic, LENGTH-AGNOSTIC
+ * replacement for asking the LLM to split the transcript. The old segment stage
+ * made the model echo the WHOLE transcript back verbatim (one narrationChunk per
+ * scene), which overflowed its output-token cap on long inputs (a 2-hour film
+ * never segmented). Splitting here in JS means the LLM only has to ANNOTATE each
+ * resulting scene, so nothing downstream depends on transcript length.
+ *
+ * Same sentence-packing rules as packByVisualBlock, but at scene scale (minutes,
+ * not seconds). Also returns each scene's word-index range so the caller can
+ * persist exact boundaries. A 2-hour transcript becomes ~25-40 scenes here.
+ */
+export function packByScene(
+  text: string,
+  opts: { minS?: number; maxS?: number; targetS?: number } = {},
+): { text: string; durationS: number; startWordIdx: number; endWordIdx: number }[] {
+  const target = opts.targetS ?? 240; // ~4 min ideal scene
+  const max = opts.maxS ?? 300; // 5 min ceiling
+  const min = opts.minS ?? 120; // 2 min floor
+  const sentences = splitSentences(text);
+  const out: { text: string; durationS: number; startWordIdx: number; endWordIdx: number }[] = [];
+
+  const wordsIn = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
+  let cursor = 0; // running word index across the whole transcript
+  let buf: string[] = [];
+  let bufDur = 0;
+  let bufWords = 0;
+  const flush = () => {
+    out.push({ text: buf.join(' '), durationS: bufDur, startWordIdx: cursor, endWordIdx: cursor + bufWords });
+    cursor += bufWords;
+    buf = [];
+    bufDur = 0;
+    bufWords = 0;
+  };
+
+  for (const s of sentences) {
+    const d = estimateNarrationDuration(s);
+    // Close the current scene before it overflows maxS, but only once it can
+    // stand on its own (>= minS); otherwise keep filling toward minS.
+    if (buf.length > 0 && bufDur + d > max && bufDur >= min) flush();
+    buf.push(s);
+    bufDur += d;
+    bufWords += wordsIn(s);
+    // Reached the ideal scene length — close it.
+    if (bufDur >= target) flush();
+  }
+  // Fold a short trailing remainder into the previous scene so we never emit a
+  // runt scene; if it already clears minS (or there's no previous scene), emit
+  // it on its own.
+  if (buf.length > 0) {
+    if (out.length > 0 && bufDur < min) {
+      const last = out[out.length - 1]!;
+      last.text = `${last.text} ${buf.join(' ')}`;
+      last.durationS += bufDur;
+      last.endWordIdx += bufWords;
+    } else {
+      flush();
+    }
+  }
+  return out;
+}
+
+/**
  * Split narration into shot-sized chunks at SENTENCE boundaries.
  *
  * One sentence == one shot. When a sentence is too short to stand on its own

@@ -47,38 +47,27 @@ Analyze the complete narration transcript and output a single JSON object with E
 
 Be concise. Descriptors and tone MUST read as visual prompt fragments suitable for image/video generation, and MUST favor stillness, darkness, low saturation and soft contrast over vivid or dramatic imagery. allowedVisualDomains/forbiddenVisualDomains define a hard boundary: everything on screen comes from the allowed list and never from the forbidden list.`;
 
-export const SEGMENT_SYSTEM = `You are an editor segmenting a SLEEP DOCUMENTARY narration into a SMALL number of LONG, calm scenes. Fewer, larger scenes mean the visual world changes less often — which is the goal. Do not chase topic micro-changes; only start a new scene on a real shift of setting or mood.
+export const SEGMENT_SYSTEM = `You are annotating ONE scene of a SLEEP DOCUMENTARY. The narration has ALREADY been split into scenes deterministically — you do NOT split, merge, reorder, rewrite or re-time anything. You are given the global analysis (the film's overall visual world + tone) and ONE scene's verbatim narration chunk. Describe a soft title and a calm, low-stimulation analysis for THIS scene only.
 
-Each scene must cover 120-300 seconds of narration (assume 150 wpm). Prefer longer scenes; never go below 120s unless the transcript itself ends. Give each a soft, evocative title. Use the global analysis to keep every scene inside the same visual world; consecutive scenes should feel like the same place, gently drifting.
+Keep the scene inside the SAME visual world as the global analysis; scenes should feel like the same place gently drifting. Favor stillness, darkness, low saturation and soft contrast over vivid or dramatic imagery.
 
-Output a single JSON object with EXACTLY this top-level shape (no extra wrapper):
+Output a single JSON object with EXACTLY this shape (no wrapper, no extra fields):
 
 {
-  "scenes": [
-    {
-      "ordinal": number,              // 0-indexed, sequential
-      "title": string,                // soft, calming scene title
-      "narrationChunk": string,       // verbatim transcript text for this scene (concatenated chunks must equal the full transcript)
-      "analysis": {
-        "topic": string,
-        "emotion": "awe" | "dread" | "wonder" | "tension" | "contemplative" | "triumph" | "melancholy" | "curiosity" | "urgency",
-                                      // Sleep default: prefer "contemplative", "wonder", "awe", "melancholy", "curiosity".
-                                      // Use "dread" | "tension" | "urgency" | "triumph" ONLY if the narration is unmistakably intense.
-        "pacing": "slow",             // ALWAYS "slow" for sleep content. Never "medium" or "fast".
-        "tension": number,            // keep <= 0.3 unless the narration is unmistakably intense
-        "atmosphere": string,         // describe ONE coherent, low-stimulation visual world for the whole scene
-                                      // (dark, low-saturation, soft, still). This is injected into every shot prompt,
-                                      // so keep it close to the previous scene's atmosphere for continuity.
-        "visualOpportunities": string[], // AMBIENT views WITHIN the niche/world, not literal illustrations of the words.
-                                      // Prefer slow environment shots over symbolic props (e.g. for space: "slow drift past
-                                      // a dim distant planet", NOT "a stopwatch" just because time was mentioned).
-        "concepts": { "scientific": string[], "abstract": string[] }
-      },
-      "estimatedDurationS": number,   // positive seconds (150 wpm)
-      "startWordIdx": number,         // 0-indexed word position in the full transcript
-      "endWordIdx": number            // exclusive end word position
-    }
-  ]
+  "title": string,                  // soft, calming scene title
+  "analysis": {
+    "topic": string,                // what this scene is about, in a few words
+    "emotion": "awe" | "dread" | "wonder" | "tension" | "contemplative" | "triumph" | "melancholy" | "curiosity" | "urgency",
+                                    // Sleep default: prefer "contemplative", "wonder", "awe", "melancholy", "curiosity".
+                                    // Use "dread" | "tension" | "urgency" | "triumph" ONLY if the narration is unmistakably intense.
+    "pacing": "slow",               // ALWAYS "slow" for sleep content. Never "medium" or "fast".
+    "tension": number,              // keep <= 0.3 unless the narration is unmistakably intense
+    "atmosphere": string,           // ONE coherent, low-stimulation visual world for this scene (dark, low-saturation,
+                                    // soft, still). Injected into every shot prompt — keep it close to the global tone.
+    "visualOpportunities": string[],// AMBIENT views WITHIN the world, not literal illustrations of the words.
+                                    // Prefer slow environment shots over symbolic props.
+    "concepts": { "scientific": string[], "abstract": string[] }
+  }
 }`;
 
 export const CLASSIFY_SYSTEM = `You are the shot designer for a SLEEP DOCUMENTARY. The viewer is trying to fall asleep, so every shot must be calm, dark and low-stimulation. The film must NOT loop near-identical footage for hours — repetitive shots get the channel demonetized — but variety comes naturally here because every shot is built from a DIFFERENT sentence of the narration.

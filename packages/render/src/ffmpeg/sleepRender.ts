@@ -48,9 +48,22 @@ export interface BuildSleepMasterOpts {
   workDir?: string;
   /** How many clips to realise in parallel. Defaults to 4. */
   concurrency?: number;
+  /**
+   * Max clips per intermediate xfade sub-master. A single xfade graph over
+   * hundreds of clips overflows ffmpeg's command line / memory (a 2-hour film
+   * is ~600 clips), so for long timelines the chain is split into batches of
+   * this size — each batch is rendered to its own crossfade master, then the
+   * masters are crossfade-JOINED at their scene seams. This is mathematically
+   * identical to one chain: a batch ending at clip b has length ΣD + o[b+1],
+   * and that trailing o[b+1] is exactly the overlap the next batch's first clip
+   * dissolves over, so offsets line up to the frame. <=0 disables batching
+   * (always single chain). Defaults to SLEEP_RENDER_BATCH_SIZE or 80.
+   */
+  batchSize?: number;
 }
 
 const DEFAULT_MAX_ZOOM = 1.02;
+const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 80);
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.
 const FREEZE_EPSILON_S = 0.08;
@@ -236,5 +249,64 @@ export async function buildSleepMaster(opts: BuildSleepMasterOpts): Promise<void
     overlapS: i === 0 ? 0 : c.crossfadeInS,
   }));
 
-  await buildXfadeChain(steps, opts.outPath, { nvenc: opts.nvenc, audio: false });
+  const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+
+  // Short timelines: one xfade graph is fine and avoids the extra re-encode.
+  if (batchSize <= 0 || steps.length <= batchSize) {
+    await buildXfadeChain(steps, opts.outPath, { nvenc: opts.nvenc, audio: false });
+    return;
+  }
+
+  // Long timelines (e.g. 2-hour ≈ 600 clips): render in batches, then
+  // crossfade-join the batch masters at their scene seams. See batchSize doc
+  // for why this is identical to the single chain.
+  await buildBatchedSleepMaster(steps, batchSize, opts, workDir);
+}
+
+/** Split `arr` into contiguous chunks of at most `size`. */
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Batched crossfade render for long timelines. Each batch of `batchSize` clips
+ * becomes its own crossfade master (within-batch dissolves applied), and the
+ * masters are then crossfade-joined: the overlap into batch j is the crossfade
+ * of batch j's FIRST clip — the same seam dissolve that single-chain rendering
+ * would apply between the last clip of j-1 and the first clip of j. Because each
+ * batch master already carries the trailing-tail length of that seam overlap,
+ * the join offsets line up exactly with the authoritative narration schedule.
+ */
+async function buildBatchedSleepMaster(
+  steps: XfadeStep[],
+  batchSize: number,
+  opts: BuildSleepMasterOpts,
+  workDir: string,
+): Promise<void> {
+  const batches = chunk(steps, batchSize);
+  // eslint-disable-next-line no-console
+  console.log(`[sleepRender] batched master: ${steps.length} clips → ${batches.length} batches of ≤${batchSize}`);
+
+  // Render each batch to its own crossfade master. The first step's overlap is
+  // ignored inside the batch (buildXfadeChain skips the first clip's fade-in);
+  // we record it as the seam overlap to apply when joining the batch masters.
+  const joinSteps: XfadeStep[] = [];
+  for (let b = 0; b < batches.length; b++) {
+    const batch = batches[b]!;
+    const seamOverlapS = batch[0]!.overlapS; // crossfadeInS of this batch's first clip (0 for batch 0)
+    const batchPath = path.join(workDir, `batch_${b.toString().padStart(4, '0')}.mp4`);
+    // eslint-disable-next-line no-await-in-loop
+    await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false });
+    // Probe the real master length so join offsets use measured, not computed,
+    // durations (immune to any per-clip frame-rounding inside the batch).
+    // eslint-disable-next-line no-await-in-loop
+    const durationS = await ffprobeDuration(batchPath).catch(() => 0);
+    joinSteps.push({ path: batchPath, durationS, xfade: 'fade', overlapS: seamOverlapS });
+  }
+
+  // Crossfade-join the batch masters. joinSteps has only ~batches.length inputs
+  // (e.g. ~8 for a 2-hour film), so this graph is tiny regardless of clip count.
+  await buildXfadeChain(joinSteps, opts.outPath, { nvenc: opts.nvenc, audio: false });
 }
