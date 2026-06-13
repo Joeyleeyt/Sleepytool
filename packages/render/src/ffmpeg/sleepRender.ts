@@ -3,8 +3,33 @@ import path from 'node:path';
 import { ffmpeg, ffprobeDuration, extractLastFrame } from './run.js';
 import { buildXfadeChain, concatDemuxer, type XfadeStep } from './concat.js';
 import { isImageInput } from './shotComposite.js';
-import { kenBurnsFilter } from './kenBurns.js';
+import { kenBurnsFilter, type KenBurnsMode } from './kenBurns.js';
 import { coverScaleCrop } from './filters.js';
+
+/**
+ * Directions a still cycles through so consecutive stills never move the same
+ * way — alternating zoom in / zoom out / pan left / right / up / down. Chosen by
+ * the clip's sequential index, so a long images-only tail keeps varying. This is
+ * what makes the post-30-min stills (and every freeze tail) feel dynamic instead
+ * of "completely still".
+ */
+const STILL_KEN_BURNS_CYCLE: KenBurnsMode[] = ['in', 'out', 'left', 'right', 'up', 'down'];
+
+/**
+ * Pick a still's Ken Burns move by index. `continuousStart` is set for the frozen
+ * tail of a SHORT video clip: that tail is hard-concatenated directly after the
+ * live video with no crossfade at the seam, so it MUST begin at zoom=1 to match
+ * the last live frame. Every mode starts at zoom=1 EXCEPT 'out', which begins
+ * fully zoomed-in and would pop the scale ~8% at that seam — so for a continuous
+ * start it's remapped to 'in' (the zoom-in counterpart, also starting at zoom=1).
+ * Standalone image shots leave `continuousStart` false: a crossfade dissolves
+ * into them, so an 'out' reveal is fine (and looks good).
+ */
+function stillKenBurnsMode(index: number, continuousStart: boolean): KenBurnsMode {
+  const len = STILL_KEN_BURNS_CYCLE.length;
+  const mode = STILL_KEN_BURNS_CYCLE[((index % len) + len) % len]!;
+  return continuousStart && mode === 'out' ? 'in' : mode;
+}
 
 /**
  * One clip in the sleep timeline. Lengths are pre-computed by the caller so that
@@ -41,8 +66,9 @@ export interface BuildSleepMasterOpts {
   height: number;
   fps: number;
   nvenc?: boolean;
-  /** Ken Burns zoom ceiling for stills and frozen tails. 1.02 = a 2% push over
-   *  the whole clip — keep it tiny; the goal is barely-perceptible drift. */
+  /** Ken Burns zoom ceiling for stills and frozen tails. 1.08 = an 8% push over
+   *  the whole clip — slow and sleep-friendly, but clearly visible (1.02 read as
+   *  "completely still"). Direction cycles per index (see STILL_KEN_BURNS_CYCLE). */
   maxZoom?: number;
   /** Scratch dir for per-clip intermediates. Defaults to outPath's dir. */
   workDir?: string;
@@ -62,7 +88,7 @@ export interface BuildSleepMasterOpts {
   batchSize?: number;
 }
 
-const DEFAULT_MAX_ZOOM = 1.02;
+const DEFAULT_MAX_ZOOM = 1.08;
 const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 80);
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.
@@ -110,23 +136,25 @@ async function runWithNvencFallback(build: (nvenc: boolean) => string[], nvenc: 
  *  barely-perceptible Ken Burns move. Used for image assets and frozen tails.
  *
  *  The motion uses the shared, jitter-free `kenBurnsFilter` (see kenBurns.ts):
- *  an eased zoom up to `maxZoom` (≈1.02 — sub-perceptual) plus a slow pan whose
- *  direction alternates by index so long runs of stills don't all drift the
- *  same way. The heavy input oversample keeps zoompan's per-frame pixel floor
- *  sub-pixel, so there is no shimmer even on the slowest sleep-story pushes. */
+ *  an eased zoom up to `maxZoom` plus a slow move whose direction cycles by index
+ *  through zoom-in / zoom-out / pan-left / right / up / down (STILL_KEN_BURNS_CYCLE)
+ *  so consecutive stills — and long images-only tails — never drift the same way.
+ *  The heavy input oversample keeps zoompan's per-frame pixel floor sub-pixel, so
+ *  there is no shimmer even on the slowest sleep-story pushes. */
 async function prepStillSegment(
   srcImage: string,
   durationS: number,
   index: number,
   opts: BuildSleepMasterOpts,
   outPath: string,
+  continuousStart = false,
 ): Promise<void> {
   const maxZoom = opts.maxZoom ?? DEFAULT_MAX_ZOOM;
   const build = (nvenc: boolean): string[] => [
     '-y',
     '-loop', '1', '-framerate', String(opts.fps), '-t', String(durationS), '-i', srcImage,
     '-filter_complex', kenBurnsFilter({
-      mode: index % 2 === 0 ? 'right' : 'left',
+      mode: stillKenBurnsMode(index, continuousStart),
       width: opts.width,
       height: opts.height,
       durationS,
@@ -213,7 +241,9 @@ async function prepClip(clip: SleepClip, opts: BuildSleepMasterOpts, workDir: st
   const videoPart = path.join(workDir, `${stem}_a.mp4`);
   const stillPart = path.join(workDir, `${stem}_b.mp4`);
   await prepVideoSegment(clip.sourcePath, liveLen, opts, videoPart);
-  await prepStillSegment(stillImg, padLen, clip.index, opts, stillPart);
+  // continuousStart: this tail is hard-concatenated straight after the live video
+  // (no crossfade at the seam), so its move must begin at zoom=1 to avoid a pop.
+  await prepStillSegment(stillImg, padLen, clip.index, opts, stillPart, true);
   // Both parts share res/fps/pixfmt/sar, so a lossless demuxer concat joins them.
   await concatDemuxer([videoPart, stillPart], out);
   return out;

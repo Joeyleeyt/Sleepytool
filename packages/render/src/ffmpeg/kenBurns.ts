@@ -25,7 +25,7 @@
  * means fewer integer-boundary crossings, i.e. less opportunity to shake.
  */
 
-export type KenBurnsMode = 'none' | 'in' | 'out' | 'left' | 'right';
+export type KenBurnsMode = 'none' | 'in' | 'out' | 'left' | 'right' | 'up' | 'down';
 
 /** 1.10 = a 10% push over the whole clip. Documentary Ken Burns is subtle; a
  *  smaller move also crosses fewer integer-pixel crop boundaries (less jitter).
@@ -57,8 +57,9 @@ export interface KenBurnsOpts {
  * Build a jitter-free Ken Burns chain `[input] … [output]`.
  *
  * The returned string is a complete filterchain (usable in `-filter_complex`).
- * Centered moves ('in' / 'out') only zoom; 'left' / 'right' also pan across the
- * zoom headroom. 'none' is a perfectly static (but still oversampled) frame.
+ * Centered moves ('in' / 'out') only zoom; 'left' / 'right' pan horizontally and
+ * 'up' / 'down' pan vertically across the zoom headroom. 'none' is a perfectly
+ * static (but still oversampled) frame.
  */
 export function kenBurnsFilter(o: KenBurnsOpts): string {
   const input = o.inputLabel ?? '0:v';
@@ -118,6 +119,17 @@ export function kenBurnsFilter(o: KenBurnsOpts): string {
       zoom = `(1+${up})`;
       x = `(iw-iw/zoom)*${ease}`;
       y = cy;
+      break;
+    case 'up':
+      // Pan vertically within the zoom headroom (max offset = ih-ih/zoom), eased.
+      zoom = `(1+${up})`;
+      x = cx;
+      y = `(ih-ih/zoom)*(1-${ease})`;
+      break;
+    case 'down':
+      zoom = `(1+${up})`;
+      x = cx;
+      y = `(ih-ih/zoom)*${ease}`;
       break;
     case 'in':
     default:
