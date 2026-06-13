@@ -14,14 +14,21 @@ const log = pino({ name: 'labs-worker' });
 // req/min rate limit). Exceeding it returns `403 Concurrent ... limit reached`.
 // `withKeySlot` gives every active key its own pool of PER_KEY_MAX slots and
 // spreads jobs across keys, so two keys run 2×PER_KEY_MAX jobs per feature at
-// once (e.g. 2 keys × 2 = 4) instead of funnelling everything through key #1.
+// once instead of funnelling everything through key #1.
+//
+// The per-key cap differs BY FEATURE on 69labs: image allows 4 concurrent jobs
+// per key, video fewer. LABS69_PER_KEY_CONCURRENCY is the shared default;
+// LABS69_IMAGE_PER_KEY_CONCURRENCY / LABS69_VIDEO_PER_KEY_CONCURRENCY override
+// it per feature (image defaults to 4 to match the provider's image cap).
 const PER_KEY_MAX = Math.max(1, Number(process.env.LABS69_PER_KEY_CONCURRENCY ?? 2));
+const IMAGE_PER_KEY_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_PER_KEY_CONCURRENCY ?? 4));
+const VIDEO_PER_KEY_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_PER_KEY_CONCURRENCY ?? PER_KEY_MAX));
 // Expected active-key count — only sizes each worker's BullMQ pull cap so
 // enough jobs are in hand to fill every key's slots. The real limiter is the
 // per-key slot pool; bump this when you add more keys. Per-kind env still wins.
 const MAX_KEYS = Math.max(1, Number(process.env.LABS69_MAX_KEYS ?? 2));
-const IMAGE_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_MAX_CONCURRENCY ?? MAX_KEYS * PER_KEY_MAX));
-const VIDEO_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_MAX_CONCURRENCY ?? MAX_KEYS * PER_KEY_MAX));
+const IMAGE_MAX = Math.max(1, Number(process.env.LABS69_IMAGE_MAX_CONCURRENCY ?? MAX_KEYS * IMAGE_PER_KEY_MAX));
+const VIDEO_MAX = Math.max(1, Number(process.env.LABS69_VIDEO_MAX_CONCURRENCY ?? MAX_KEYS * VIDEO_PER_KEY_MAX));
 
 // Provider job ids currently in flight (id -> URL segment), so we can cancel
 // them on shutdown instead of orphaning them — orphaned jobs keep occupying a
@@ -132,8 +139,9 @@ async function processShot(job: Job) {
       '69labs',
       async (apiKey, keyId) => {
         // Per-key hourly quota: 69labs allows 100 images / 40 videos per hour
-        // PER KEY, and with concurrency=2 that's the BINDING cap (sustained
-        // generation would otherwise exceed it). Charge one token to THIS key's
+        // PER KEY — the BINDING cap for sustained generation (the per-key
+        // concurrency slots, 4 image / 2 video, just bound the burst rate).
+        // Charge one token to THIS key's
         // hourly bucket before submitting; blocks here if the key has spent its
         // hour. Bucketed per key, so two keys give 200/80 an hour and a disabled
         // key only drops its own share. (Held under the key's concurrency slot —
@@ -144,12 +152,14 @@ async function processShot(job: Job) {
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
             onStatus,
-            // Full HD target: 2k (~2048×1152) is the smallest 69labs tier that
-            // fully covers a 1920×1080 frame, so it downscales to crisp Full HD
-            // (1k is sub-1080p and would be upscaled). nano-banana models
-            // accept 1k|2k|4k; override via LABS69_IMAGE_RESOLUTION.
+            // 1k is the only resolution this 69labs account/tier actually
+            // serves — submitting 2k/4k returns `503 SERVICE_UNAVAILABLE` even
+            // though /images/models advertises them (verified live, 2026-06-12).
+            // 1k for 16:9 (~1024×576) is sub-1080p and gets upscaled in the
+            // final encode; bump back to 2k via LABS69_IMAGE_RESOLUTION only
+            // once the plan actually supports it.
             aspectRatio: '16:9',
-            resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '2k',
+            resolution: process.env.LABS69_IMAGE_RESOLUTION ?? '1k',
             onSubmit,
             onJobId,
             apiKey,
@@ -169,7 +179,7 @@ async function processShot(job: Job) {
           });
       },
       {
-        perKeyMax: PER_KEY_MAX,
+        perKeyMax: kind === 'image' ? IMAGE_PER_KEY_MAX : VIDEO_PER_KEY_MAX,
         leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
         // Redis-backed slot pools, one per key: `cc:69labs.image:<keyId>`.
         tryAcquireSlot,

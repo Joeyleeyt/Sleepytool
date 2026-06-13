@@ -17,6 +17,12 @@ primary_region = 'lhr'
   NVENC_ENABLED = 'false'
   RENDER_WORK_DIR = '/data/emberforge'
 
+  # 69labs image resolution. 1k is the only value this account/tier serves —
+  # 2k/4k return `503 SERVICE_UNAVAILABLE` on submit (verified 2026-06-12), which
+  # silently kills every image_with_motion shot. Raise only once the plan
+  # actually supports it. See apps/workers/labs-worker/src/index.ts.
+  LABS69_IMAGE_RESOLUTION = '1k'
+
   # The final encode now re-encodes the master (it applies the global cinematic
   # grade + rising-ember overlay — see packages/render/src/ffmpeg/filters.ts),
   # rather than stream-copying. On this CPU-only VM 'veryfast' keeps that full

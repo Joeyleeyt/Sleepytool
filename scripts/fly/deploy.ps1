@@ -1,6 +1,6 @@
 # Deploy the EmberForge worker app (sleepytool) to Fly.io. The orchestrator +
 # 69labs/veo3 workers run as the `workers` process group and ffmpeg as the
-# `render` group — both inside this one app (infra/fly/sleepytool.fly.toml).
+# `render` group - both inside this one app (infra/fly/sleepytool.fly.toml).
 # `fly deploy` ships the whole app (all process groups) at once. Web + API
 # live on Vercel.
 #
@@ -21,7 +21,7 @@ try {
 
     foreach ($a in $apps) {
         Write-Host ""
-        Write-Host "════════ $($a.Name) ════════" -ForegroundColor Cyan
+        Write-Host "======== $($a.Name) ========" -ForegroundColor Cyan
         & fly deploy --app $a.Name --config $a.Toml --remote-only | Out-Host
         if ($LASTEXITCODE -ne 0) {
             Write-Host "deploy failed for $($a.Name)" -ForegroundColor Red
