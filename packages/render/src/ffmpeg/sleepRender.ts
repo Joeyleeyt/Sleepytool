@@ -66,9 +66,11 @@ export interface BuildSleepMasterOpts {
   height: number;
   fps: number;
   nvenc?: boolean;
-  /** Ken Burns zoom ceiling for stills and frozen tails. 1.08 = an 8% push over
-   *  the whole clip — slow and sleep-friendly, but clearly visible (1.02 read as
-   *  "completely still"). Direction cycles per index (see STILL_KEN_BURNS_CYCLE). */
+  /** Ken Burns zoom ceiling for stills and frozen tails. 1.18 = an 18% push over
+   *  the whole clip — a clearly dynamic drift (1.02 read as "completely still",
+   *  1.08 as "too low"). Eased over the full clip, so this ceiling is the only
+   *  lever on perceived motion SPEED. Direction cycles per index (STILL_KEN_BURNS_CYCLE).
+   *  The render-worker passes SLEEP_KENBURNS_MAX_ZOOM; this default is the fallback. */
   maxZoom?: number;
   /** Scratch dir for per-clip intermediates. Defaults to outPath's dir. */
   workDir?: string;
@@ -88,7 +90,7 @@ export interface BuildSleepMasterOpts {
   batchSize?: number;
 }
 
-const DEFAULT_MAX_ZOOM = 1.08;
+const DEFAULT_MAX_ZOOM = 1.18;
 const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 80);
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.

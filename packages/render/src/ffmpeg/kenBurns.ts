@@ -27,10 +27,12 @@
 
 export type KenBurnsMode = 'none' | 'in' | 'out' | 'left' | 'right' | 'up' | 'down';
 
-/** 1.10 = a 10% push over the whole clip. Documentary Ken Burns is subtle; a
- *  smaller move also crosses fewer integer-pixel crop boundaries (less jitter).
- *  Override with KENBURNS_MAX_ZOOM; sleep stories pass ~1.02 explicitly. */
-const DEFAULT_MAX_ZOOM = 1.1;
+/** 1.18 = an 18% push over the whole clip — a clearly dynamic move (raised from
+ *  1.10 on client feedback that the motion was "too low"). A smaller move crosses
+ *  fewer integer-pixel crop boundaries (less jitter), but the 4× oversample keeps
+ *  even this larger push sub-pixel and shimmer-free. Override with KENBURNS_MAX_ZOOM;
+ *  the sleep path passes SLEEP_KENBURNS_MAX_ZOOM (default 1.18). */
+const DEFAULT_MAX_ZOOM = 1.18;
 
 function even(n: number): number {
   return Math.round(n / 2) * 2;

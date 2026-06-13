@@ -45,10 +45,13 @@ const SLEEP_CROSSFADE_DURATION = Number(process.env.SLEEP_CROSSFADE_DURATION ?? 
 const SLEEP_SCENE_CROSSFADE_DURATION = Number(
   process.env.SLEEP_SCENE_CROSSFADE_DURATION ?? String(SLEEP_CROSSFADE_DURATION),
 );
-// Ken Burns zoom ceiling for stills / frozen tails (1.08 = 8% push over a clip).
-// Was 1.02 (~2%, sub-perceptual) — the client read those stills as "completely
-// still", so the move is now a clearly-visible but slow, sleep-friendly drift.
-const SLEEP_KENBURNS_MAX_ZOOM = Number(process.env.SLEEP_KENBURNS_MAX_ZOOM ?? '1.08');
+// Ken Burns zoom ceiling for stills / frozen tails (1.18 = 18% push over a clip).
+// History: 1.02 (~2%) read as "completely still"; 1.08 was visible but the client
+// then said the motion was "too low" — so the ceiling is raised again to a clearly
+// dynamic drift. Because the move is eased across the WHOLE (narration-fixed) clip,
+// a higher ceiling is the only lever on perceived SPEED: more travel in the same
+// time = faster motion. Tune live with SLEEP_KENBURNS_MAX_ZOOM (no code change).
+const SLEEP_KENBURNS_MAX_ZOOM = Number(process.env.SLEEP_KENBURNS_MAX_ZOOM ?? '1.18');
 
 /**
  * Sleep renderer permits a cross-dissolve only. Any flashy transition the
