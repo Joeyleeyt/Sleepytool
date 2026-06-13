@@ -6,26 +6,35 @@
  * `cinematic_video` and `atmospheric_broll` shots route to a video model
  * (Veo 3 or `69labs.video`).
  *
- * Two regimes, split at SECTION_BOUNDARY_S of elapsed narration time:
+ * Three regimes, split by elapsed narration time:
  *
  *   • First 20 min  — pattern `clip → clip → image` (period 3, image every 3rd
  *     shot). Motion-forward; an image never lands next to another image.
  *
- *   • After 20 min  — pattern `clip → image → image` (period 3, two images then
+ *   • 20–30 min     — pattern `clip → image → image` (period 3, two images then
  *     a clip). Images are more frequent to cut motion fatigue on long runs;
  *     the clip acts as a "motion anchor" and there are never more than two
  *     consecutive images.
  *
+ *   • After 30 min  — images only. Every shot routes to image_with_motion (no
+ *     video clips), so long-form tails are cheap, still and restful.
+ *
  * Section membership is by a shot's START time (cumulative duration of the
- * shots before it). The 3-shot cycle restarts the moment we cross into the late
- * section, so the first late shot is always a clip and both patterns stay clean
- * across the boundary. Shots MUST be passed in timeline order.
+ * shots before it). The 3-shot cycle restarts the moment we cross a boundary,
+ * so the first shot of each section is always a clip (until images-only) and
+ * the patterns stay clean across the seams. Shots MUST be passed in timeline
+ * order.
  */
 import type { VisualType } from '@emberforge/core';
 
-// Boundary between the two sequencing regimes, in elapsed seconds. Default 20
-// min; override via env for shorter/longer-form content.
+// Boundary between the early (C C I) and late (C I I) sequencing regimes, in
+// elapsed seconds. Default 20 min; override via env for shorter/longer content.
 const SECTION_BOUNDARY_S = Number(process.env.SHOT_SECTION_BOUNDARY_S ?? 20 * 60);
+
+// After this elapsed time, every shot is an image (no video clips). Default 30
+// min; override via env. Should be >= SECTION_BOUNDARY_S to keep the regimes in
+// order (early → late → images-only).
+const IMAGES_ONLY_AFTER_S = Number(process.env.SHOT_IMAGES_ONLY_AFTER_S ?? 30 * 60);
 
 const IMAGE_TYPE: VisualType = 'image_with_motion';
 const FALLBACK_VIDEO_TYPE: VisualType = 'atmospheric_broll';
@@ -76,20 +85,27 @@ export function applyVisualQuota<T extends { visualType: VisualType; durationS: 
   if (shots.length === 0) return shots;
 
   let elapsedS = 0;
-  let inLateSection = false;
+  let section = 0; // 0 = early (C C I), 1 = late (C I I), 2 = images-only
   let phase = 0; // position within the current section's 3-shot cycle
 
   return shots.map((shot) => {
-    // Cross into the late section on the first shot whose start time is past the
-    // boundary, and restart the cycle so that shot is a clip (motion anchor).
-    if (!inLateSection && elapsedS >= SECTION_BOUNDARY_S) {
-      inLateSection = true;
+    // Promote the section on the first shot whose start time crosses a boundary,
+    // restarting the cycle so that shot is a clip (motion anchor) in the early/
+    // late regimes. Check images-only first so a single shot can't skip it when
+    // both boundaries fall within one slot. Late takes effect at/after 20 min;
+    // images-only at/after 30 min.
+    if (section < 2 && elapsedS >= IMAGES_ONLY_AFTER_S) {
+      section = 2;
+      phase = 0;
+    } else if (section < 1 && elapsedS >= SECTION_BOUNDARY_S) {
+      section = 1;
       phase = 0;
     }
 
     // Early: image only on phase 2 (C C I). Late: images on phases 1 and 2
     // (C I I) — at most two in a row, always broken by the phase-0 clip.
-    const isImage = inLateSection ? phase === 1 || phase === 2 : phase === 2;
+    // Images-only: every shot is an image.
+    const isImage = section === 2 ? true : section === 1 ? phase === 1 || phase === 2 : phase === 2;
 
     phase = (phase + 1) % 3;
     elapsedS += durationOf(shot);
