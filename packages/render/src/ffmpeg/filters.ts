@@ -76,20 +76,21 @@ export function cinematicGrade(): string {
 
 export type OverlayMode = 'off' | 'auto' | 'embers' | 'lightleak' | 'particles';
 
-/** Resolve CINEMATIC_OVERLAY. 'particles' = asset-free synthetic fire embers
- *  rising from the bottom. 'lightleak' = asset-free drifting warm wash. 'auto' =
- *  use a real ember asset from the FX library if one is present, else fall back
- *  to synthetic particles.
+/** Resolve CINEMATIC_OVERLAY. 'embers' (default) = screen-blend the real ember
+ *  plate bundled in the FX library (falls back to synthetic particles if the
+ *  plate is missing). 'particles' = asset-free synthetic fire embers rising from
+ *  the bottom. 'lightleak' = asset-free drifting warm wash. 'auto' = use a real
+ *  ember asset if one is present, else fall back to synthetic particles.
  *
- *  PENDING (disabled by default): the fiery ember overlay is parked for now —
- *  the whole implementation below is kept intact so it can be switched back on
- *  with CINEMATIC_OVERLAY=particles (or embers / lightleak / auto) without any
- *  code change. Until then the default is 'off' and no overlay is rendered. */
+ *  ON by default: a sparks/embers plate ships in packages/render/assets, so the
+ *  global overlay renders out of the box on every machine. Set
+ *  CINEMATIC_OVERLAY=off to disable it (e.g. for the instant stream-copy mux on
+ *  fast review renders), or to any other mode above to switch implementation. */
 function overlayMode(): OverlayMode {
-  const v = (process.env.CINEMATIC_OVERLAY ?? 'off').toLowerCase();
+  const v = (process.env.CINEMATIC_OVERLAY ?? 'embers').toLowerCase();
   if (v === 'off' || v === 'false' || v === '0' || v === 'none') return 'off';
   if (v === 'embers' || v === 'lightleak' || v === 'auto' || v === 'particles') return v;
-  return 'off';
+  return 'embers';
 }
 
 function roundEven(n: number): number {
