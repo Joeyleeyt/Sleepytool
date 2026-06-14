@@ -7,7 +7,7 @@ import { Plus, Film, Upload, FileText, X } from 'lucide-react';
 import { NavRail } from '@/components/layout/NavRail';
 import { Button } from '@/components/primitives/Button';
 import { Badge } from '@/components/primitives/Badge';
-import { api } from '@/lib/api';
+import { api, type Project } from '@/lib/api';
 import { STAGE_LABELS, formatRelative } from '@/lib/utils';
 
 export default function WorkspaceHome() {
@@ -41,11 +41,17 @@ export default function WorkspaceHome() {
   );
 }
 
+// Shared grid template — keep Skeleton and ProjectGrid in lockstep so loading
+// and loaded states don't reflow. Denser than before (up to 6 cols) with a
+// tighter gap so individual cards read as compact tiles, not posters.
+const GRID_CLASS =
+  'grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3';
+
 function Skeleton() {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-      {[0, 1, 2, 3].map((i) => (
-        <div key={i} className="h-56 rounded-card border border-border bg-bg-elev shimmer" />
+    <div className={GRID_CLASS}>
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <div key={i} className="aspect-[4/3] rounded-card border border-border bg-bg-elev shimmer" />
       ))}
     </div>
   );
@@ -68,27 +74,82 @@ function Empty({ onNew }: { onNew: () => void }) {
 
 function ProjectGrid({ projects }: { projects: Awaited<ReturnType<typeof api.listProjects>>['projects'] }) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+    <div className={GRID_CLASS}>
       {projects.map((p) => (
         <Link
           key={p.id}
           href={`/p/${p.id}/script`}
           className="group rounded-card border border-border bg-bg-elev hover:border-border-strong transition-colors overflow-hidden"
         >
-          <div className="aspect-video bg-bg-subtle grid place-items-center text-text-faint group-hover:text-text-dim">
-            <Film size={28} />
-          </div>
-          <div className="p-3">
-            <div className="text-sm font-medium truncate">{p.title}</div>
-            <div className="mt-2 flex items-center justify-between">
+          <ProjectThumb assetId={p.previewAssetId} kind={p.previewKind} title={p.title} />
+          <div className="p-2.5">
+            <div className="text-[13px] font-medium truncate">{p.title}</div>
+            <div className="mt-1.5 flex items-center justify-between gap-2">
               <Badge tone={p.status === 'published' ? 'ok' : p.status === 'failed' ? 'bad' : p.status === 'ingested' ? 'neutral' : 'busy'}>
                 {STAGE_LABELS[p.status] ?? p.status}
               </Badge>
-              <span className="text-[11px] text-text-faint">{formatRelative(p.updatedAt)}</span>
+              <span className="text-[11px] text-text-faint shrink-0">{formatRelative(p.updatedAt)}</span>
             </div>
           </div>
         </Link>
       ))}
+    </div>
+  );
+}
+
+// Project-grid thumbnail: shows the first generated visual if the project has
+// one, otherwise the film-strip placeholder. The signed URL is fetched per
+// asset id and cached by react-query (keyed by the stable asset id), so the 5s
+// list refetch doesn't reload images — only a brand-new preview triggers a
+// fetch. Signed URLs live 1h; we refetch every 50 min to stay ahead of expiry.
+function ProjectThumb({
+  assetId,
+  kind,
+  title,
+}: {
+  assetId?: string | null;
+  kind?: Project['previewKind'];
+  title: string;
+}) {
+  const { data } = useQuery({
+    queryKey: ['asset-url', assetId],
+    queryFn: () => api.getAssetUrl(assetId!),
+    enabled: !!assetId,
+    staleTime: 50 * 60 * 1000,
+    refetchInterval: 50 * 60 * 1000,
+  });
+  // Fall back to the placeholder if the media itself fails to load (e.g. a
+  // signed URL that expired before the 50-min refetch, or a deleted R2 object).
+  // Keyed off the URL so a fresh URL clears a stale failure.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+
+  if (assetId && data?.url && data.url !== failedUrl) {
+    return kind === 'video_clip' ? (
+      <video
+        // `#t=0.1` seeks to the first frame so Chromium paints it instead of a
+        // black box (preload="metadata" alone fetches metadata, not pixels). The
+        // fragment isn't sent to the server, so it doesn't break the signed URL.
+        src={`${data.url}#t=0.1`}
+        muted
+        playsInline
+        preload="metadata"
+        onError={() => setFailedUrl(data.url)}
+        className="aspect-[4/3] w-full object-cover bg-bg-subtle"
+      />
+    ) : (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={data.url}
+        alt={title}
+        onError={() => setFailedUrl(data.url)}
+        className="aspect-[4/3] w-full object-cover bg-bg-subtle"
+      />
+    );
+  }
+
+  return (
+    <div className="aspect-[4/3] bg-bg-subtle grid place-items-center text-text-faint group-hover:text-text-dim">
+      <Film size={24} />
     </div>
   );
 }

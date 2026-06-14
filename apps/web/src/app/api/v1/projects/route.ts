@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { CreateProjectSchema } from '@emberforge/core/schemas';
-import { eventsRepo, projectsRepo, transcriptsRepo } from '@emberforge/db';
+import { assetsRepo, eventsRepo, projectsRepo, transcriptsRepo } from '@emberforge/db';
 import { startAnalysisFlow } from '@emberforge/queue';
 import { parseJsonBody } from '@/lib/httpBody';
 
@@ -11,7 +11,21 @@ const DEV_OWNER_ID = process.env.DEV_OWNER_ID ?? '00000000-0000-0000-0000-000000
 
 export async function GET() {
   const rows = await projectsRepo.listByOwner(DEV_OWNER_ID, { limit: 100 });
-  return NextResponse.json({ projects: rows });
+  // Attach a thumbnail asset id per project (opening visual in plan order) so
+  // the grid can render a real frame instead of a placeholder. The client signs
+  // the URL lazily per asset id — we return only the stable id here so the list
+  // can refetch on its 5s interval without re-signing (and thus reloading) every
+  // thumbnail.
+  const previews = await assetsRepo.firstVisualByProjects(rows.map((r) => r.id));
+  const projects = rows.map((r) => {
+    const preview = previews.get(r.id);
+    return {
+      ...r,
+      previewAssetId: preview?.id ?? null,
+      previewKind: preview?.kind ?? null,
+    };
+  });
+  return NextResponse.json({ projects });
 }
 
 export async function POST(request: Request) {

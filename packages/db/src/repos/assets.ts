@@ -1,7 +1,12 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { AssetKind } from '@emberforge/core';
 import { db } from '../client.js';
 import { assets, scenes, shots } from '../schema/index.js';
+
+// Visual asset kinds eligible to be a project's thumbnail (a still or a clip —
+// not audio/subtitle/overlay). Used as a set filter; the actual pick is by
+// plan order, not by this list's order.
+const PREVIEW_KINDS: AssetKind[] = ['image', 'video_clip'];
 
 export const assetsRepo = {
   async create(row: typeof assets.$inferInsert) {
@@ -32,6 +37,31 @@ export const assetsRepo = {
       .where(eq(assets.projectId, projectId))
       .orderBy(asc(scenes.ordinal), asc(shots.ordinal));
     return rows.map((r) => r.asset);
+  },
+
+  /**
+   * Pick one preview (thumbnail) asset per project for a batch of project ids —
+   * the first visual asset in shot-plan order (scene then shot ordinal), so the
+   * thumbnail matches the opening shot of the video. Returns a map keyed by
+   * projectId; projects with no visual asset yet are simply absent. Drives the
+   * project-grid thumbnails on the workspace home so a project with generated
+   * assets shows real frames instead of the film-strip placeholder.
+   */
+  async firstVisualByProjects(projectIds: string[]) {
+    const map = new Map<string, { id: string; kind: AssetKind }>();
+    if (projectIds.length === 0) return map;
+    const rows = await db
+      .select({ projectId: assets.projectId, id: assets.id, kind: assets.kind })
+      .from(assets)
+      .innerJoin(shots, eq(assets.shotId, shots.id))
+      .innerJoin(scenes, eq(shots.sceneId, scenes.id))
+      .where(and(inArray(assets.projectId, projectIds), inArray(assets.kind, PREVIEW_KINDS)))
+      .orderBy(asc(scenes.ordinal), asc(shots.ordinal));
+    // Rows are ordered by plan position; first one seen per project wins.
+    for (const r of rows) {
+      if (!map.has(r.projectId)) map.set(r.projectId, { id: r.id, kind: r.kind });
+    }
+    return map;
   },
 
   async findByShotKind(shotId: string, kind: AssetKind) {

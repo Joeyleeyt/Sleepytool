@@ -59,6 +59,11 @@ export interface Project {
   targetFps: number;
   createdAt: string;
   updatedAt: string;
+  /** Thumbnail asset for the project grid — the opening visual in plan order,
+   *  or null before any visual asset has been generated. Sign its URL with
+   *  getAssetUrl(previewAssetId). */
+  previewAssetId?: string | null;
+  previewKind?: AssetKind | null;
 }
 
 export interface SceneWithShots {
