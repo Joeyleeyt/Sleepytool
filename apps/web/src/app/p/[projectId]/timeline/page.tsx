@@ -11,6 +11,17 @@ import { formatDuration } from '@/lib/utils';
 
 const PX_PER_SECOND_OPTIONS = [2, 8, 24]; // ~ zoom levels
 
+// Statuses at/after which a render row can exist, so polling /render-url is
+// worthwhile. Earlier stages (ingest → assets_ready) have no render yet, so we
+// skip the 404 polling entirely until the project reaches the render phase.
+const RENDER_CAPABLE = new Set([
+  'timeline_built',
+  'audio_mixed',
+  'composited',
+  'encoded',
+  'published',
+]);
+
 export default function TimelinePage() {
   const { projectId } = useParams() as { projectId: string };
   const [pxPerSec, setPxPerSec] = useState<number>(8);
@@ -63,7 +74,7 @@ export default function TimelinePage() {
       }
     >
       <div className="h-full flex flex-col">
-        <PreviewMonitor totalDur={totalDur} />
+        <PreviewMonitor projectId={projectId} totalDur={totalDur} />
 
         <div className="border-t border-border p-2 flex items-center gap-3 bg-bg-subtle">
           <span className="text-xs text-text-faint">Zoom</span>
@@ -91,9 +102,46 @@ export default function TimelinePage() {
   );
 }
 
-function PreviewMonitor({ totalDur }: { totalDur: number }) {
+function PreviewMonitor({ projectId, totalDur }: { projectId: string; totalDur: number }) {
+  // Gate render-url polling on project status: only once the project reaches the
+  // render phase can a render exist. This stops early-stage timelines from
+  // polling a 404 every 8s. Keep polling status until it's published (terminal).
+  const { data: project } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => api.getProject(projectId),
+    enabled: !!projectId,
+    refetchInterval: (q) => (q.state.data?.status === 'published' ? false : 5000),
+  });
+  const renderCapable = !!project && RENDER_CAPABLE.has(project.status);
+
+  // Latest succeeded render, if any. The endpoint 404s until a render lands, so
+  // we don't retry the error and keep polling until a URL appears, then stop.
+  // Signed URLs live 1h; staleTime keeps us from re-signing on every scene poll.
+  const { data: render } = useQuery({
+    queryKey: ['render-url', projectId],
+    queryFn: () => api.getRenderUrl(projectId),
+    enabled: !!projectId && renderCapable,
+    retry: false,
+    staleTime: 50 * 60_000,
+    refetchInterval: (q) => (q.state.data?.url ? false : 8000),
+  });
+
+  const wrap = 'aspect-video max-h-[40vh] mx-auto mt-4 w-[min(100%-2rem,1200px)] bg-black rounded-card border border-border';
+
+  if (render?.url) {
+    return (
+      <video
+        src={render.url}
+        controls
+        playsInline
+        preload="metadata"
+        className={`${wrap} object-contain`}
+      />
+    );
+  }
+
   return (
-    <div className="aspect-video max-h-[40vh] mx-auto mt-4 w-[min(100%-2rem,1200px)] bg-black rounded-card border border-border grid place-items-center text-text-faint">
+    <div className={`${wrap} grid place-items-center text-text-faint`}>
       <div className="text-center">
         <Play size={42} className="mx-auto opacity-50" />
         <div className="mt-2 text-xs font-mono">00:00 / {formatDuration(totalDur)}</div>
