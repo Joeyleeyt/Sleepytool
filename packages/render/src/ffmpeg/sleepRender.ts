@@ -1,10 +1,10 @@
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ffmpeg, ffprobeDuration, extractLastFrame } from './run.js';
-import { buildXfadeChain, concatDemuxer, type XfadeStep } from './concat.js';
+import { buildXfadeChain, concatDemuxer, type XfadeStep, type XfadeFinish } from './concat.js';
 import { isImageInput } from './shotComposite.js';
 import { kenBurnsFilter, type KenBurnsMode } from './kenBurns.js';
-import { coverScaleCrop } from './filters.js';
+import { cinematicGrade, coverScaleCrop, isCinematicGradeEnabled, planEmberOverlay } from './filters.js';
 
 /**
  * Directions a still cycles through so consecutive stills never move the same
@@ -92,6 +92,12 @@ export interface BuildSleepMasterOpts {
 
 const DEFAULT_MAX_ZOOM = 1.18;
 const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 80);
+// How many batch sub-masters to render concurrently. Batches are independent —
+// each is its own xfade master and only the final join needs them all — so on a
+// multi-core box several can encode at once. Each xfade ffmpeg is itself
+// multi-threaded, so keep this modest to avoid oversubscription; 2 is the safe
+// default on an 8 vCPU render machine. <=1 restores the old sequential behaviour.
+const DEFAULT_BATCH_CONCURRENCY = Math.max(1, Number(process.env.SLEEP_BATCH_CONCURRENCY ?? 2));
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.
 const FREEZE_EPSILON_S = 0.08;
@@ -115,9 +121,17 @@ function intermediateEncodeArgs(nvenc: boolean): string[] {
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '20';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '20';
+  // Cap threads PER encode. Many of these run in parallel (MIX_CONCURRENCY), so
+  // letting each libx264 auto-grab every core oversubscribes the scheduler and
+  // slows the whole prep phase. ≈ cores / concurrency is ideal; default 2 (so the
+  // 8 vCPU box runs ~4 encodes × 2 threads = 8). '0' lets x264 auto-pick (one
+  // thread per core) for the single-encode case. Thread count does NOT affect
+  // output quality — only encode speed/determinism — so this is a free speedup.
+  const x264Threads = process.env.FFMPEG_INTERMEDIATE_THREADS ?? '2';
+  const threadArgs = x264Threads !== '0' ? ['-threads', x264Threads] : [];
   return nvenc
     ? ['-c:v', 'h264_nvenc', '-preset', nvencPreset, '-cq', nvencCq]
-    : ['-c:v', 'libx264', '-preset', x264Preset, '-crf', x264Crf];
+    : ['-c:v', 'libx264', '-preset', x264Preset, '-crf', x264Crf, ...threadArgs];
 }
 
 const NVENC_RE = /nvenc|nvcuda|cuda|gpu/i;
@@ -282,17 +296,35 @@ export async function buildSleepMaster(opts: BuildSleepMasterOpts): Promise<void
   }));
 
   const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
+  // Resolve the finishing look ONCE and bake it into the final pass (below) so
+  // finalEncode can stream-copy instead of running a second full re-encode.
+  const finish = resolveFinish(opts);
 
   // Short timelines: one xfade graph is fine and avoids the extra re-encode.
   if (batchSize <= 0 || steps.length <= batchSize) {
-    await buildXfadeChain(steps, opts.outPath, { nvenc: opts.nvenc, audio: false });
+    await buildXfadeChain(steps, opts.outPath, { nvenc: opts.nvenc, audio: false, finish });
     return;
   }
 
   // Long timelines (e.g. 2-hour ≈ 600 clips): render in batches, then
   // crossfade-join the batch masters at their scene seams. See batchSize doc
   // for why this is identical to the single chain.
-  await buildBatchedSleepMaster(steps, batchSize, opts, workDir);
+  await buildBatchedSleepMaster(steps, batchSize, opts, workDir, finish);
+}
+
+/**
+ * Resolve the global "finishing" look (cinematic grade + ember overlay) so it can
+ * be baked into the FINAL xfade pass. Reads the same env switches finalEncode
+ * uses, so enabling/disabling either lever behaves identically — the only
+ * difference is WHERE it's applied (one fewer encode pass). Returns undefined
+ * when both are off: the master is then a plain encode and finalEncode
+ * stream-copies it (the fast review-render path).
+ */
+function resolveFinish(opts: BuildSleepMasterOpts): XfadeFinish | undefined {
+  const grade = isCinematicGradeEnabled() ? cinematicGrade() : null;
+  const overlay = planEmberOverlay(opts.width, opts.height, opts.fps);
+  if (!grade && !overlay) return undefined;
+  return { grade, overlay, width: opts.width, height: opts.height };
 }
 
 /** Split `arr` into contiguous chunks of at most `size`. */
@@ -316,29 +348,33 @@ async function buildBatchedSleepMaster(
   batchSize: number,
   opts: BuildSleepMasterOpts,
   workDir: string,
+  finish?: XfadeFinish,
 ): Promise<void> {
   const batches = chunk(steps, batchSize);
+  const batchConcurrency = Math.min(DEFAULT_BATCH_CONCURRENCY, batches.length);
   // eslint-disable-next-line no-console
-  console.log(`[sleepRender] batched master: ${steps.length} clips → ${batches.length} batches of ≤${batchSize}`);
+  console.log(
+    `[sleepRender] batched master: ${steps.length} clips → ${batches.length} batches of ≤${batchSize} (concurrency ${batchConcurrency})`,
+  );
 
-  // Render each batch to its own crossfade master. The first step's overlap is
-  // ignored inside the batch (buildXfadeChain skips the first clip's fade-in);
+  // Render the batches to their own crossfade masters. They're independent, so a
+  // bounded pool encodes several at once; mapLimit preserves input order, so
+  // joinSteps stays in batch order for the final join. The first step's overlap
+  // is ignored inside each batch (buildXfadeChain skips the first clip's fade-in);
   // we record it as the seam overlap to apply when joining the batch masters.
-  const joinSteps: XfadeStep[] = [];
-  for (let b = 0; b < batches.length; b++) {
-    const batch = batches[b]!;
+  const joinSteps = await mapLimit(batches, batchConcurrency, async (batch, b) => {
     const seamOverlapS = batch[0]!.overlapS; // crossfadeInS of this batch's first clip (0 for batch 0)
     const batchPath = path.join(workDir, `batch_${b.toString().padStart(4, '0')}.mp4`);
-    // eslint-disable-next-line no-await-in-loop
     await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false });
     // Probe the real master length so join offsets use measured, not computed,
     // durations (immune to any per-clip frame-rounding inside the batch).
-    // eslint-disable-next-line no-await-in-loop
     const durationS = await ffprobeDuration(batchPath).catch(() => 0);
-    joinSteps.push({ path: batchPath, durationS, xfade: 'fade', overlapS: seamOverlapS });
-  }
+    return { path: batchPath, durationS, xfade: 'fade', overlapS: seamOverlapS } as XfadeStep;
+  });
 
   // Crossfade-join the batch masters. joinSteps has only ~batches.length inputs
   // (e.g. ~8 for a 2-hour film), so this graph is tiny regardless of clip count.
-  await buildXfadeChain(joinSteps, opts.outPath, { nvenc: opts.nvenc, audio: false });
+  // The finishing grade + overlay is baked in HERE (the join is the deliverable
+  // pass) — not in the per-batch encodes above, which would double-apply it.
+  await buildXfadeChain(joinSteps, opts.outPath, { nvenc: opts.nvenc, audio: false, finish });
 }

@@ -12,12 +12,23 @@ export interface FinalEncodeOpts {
   nvenc?: boolean;
   res: '1920x1080' | '3840x2160';
   fps: 24 | 30 | 60;
+  /**
+   * When true, the master already has the global grade + ember overlay baked in
+   * (the sleep renderer does this in its finishing pass), so this stage must NOT
+   * re-apply them — that would double-grade. It stream-copies instead (or, when
+   * burning subtitles, re-encodes with subs only). This is what turns the final
+   * stage from a full re-encode into a near-instant mux.
+   */
+  videoFinished?: boolean;
 }
 
 export async function finalEncode(opts: FinalEncodeOpts): Promise<void> {
   const [w, h] = opts.res.split('x');
-  const grade = isCinematicGradeEnabled();
-  const overlay = planEmberOverlay(Number(w), Number(h), opts.fps);
+  // If the master is already finished, the grade + overlay are baked in — treat
+  // them as off here so we don't apply them twice (and so the fast stream-copy
+  // path below is reachable).
+  const grade = opts.videoFinished ? false : isCinematicGradeEnabled();
+  const overlay = opts.videoFinished ? null : planEmberOverlay(Number(w), Number(h), opts.fps);
 
   // FAST PATH — nothing to render onto the master: no subtitle burn-in, no grade
   // (CINEMATIC_GRADE=false) AND no ember/light-leak overlay (CINEMATIC_OVERLAY=off).

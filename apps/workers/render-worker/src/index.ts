@@ -419,7 +419,12 @@ async function runAudioMix(projectId: string): Promise<string> {
   }
 }
 
-async function runFinalEncode(projectId: string, masterVideo: string, masterAudio: string) {
+async function runFinalEncode(
+  projectId: string,
+  masterVideo: string,
+  masterAudio: string,
+  videoFinished = false,
+) {
   const t0 = Date.now();
   log.info({ projectId }, '[encode] start');
   await eventsRepo.emit(projectId, 'encode', 'render_started');
@@ -467,6 +472,9 @@ async function runFinalEncode(projectId: string, masterVideo: string, masterAudi
       res: project.targetRes as '1920x1080' | '3840x2160',
       fps: project.targetFps as 24 | 30 | 60,
       nvenc: NVENC,
+      // The sleep renderer bakes the grade + overlay into its master, so the
+      // final stage only muxes audio (stream-copy) instead of re-encoding.
+      videoFinished,
     });
     log.info({ projectId, tookMs: Date.now() - encodeStart }, '[encode] ffmpeg done; uploading');
 
@@ -520,7 +528,9 @@ const worker = new Worker(
         // someone replays only the encode stage.
         const master = await runComposite(projectId);
         const audio = await runAudioMix(projectId);
-        return runFinalEncode(projectId, master, audio);
+        // The sleep path bakes the grade + overlay into its master, so the final
+        // encode stream-copies; the legacy mixClips path still applies them here.
+        return runFinalEncode(projectId, master, audio, SLEEP_RENDER);
       }
     }
   },
