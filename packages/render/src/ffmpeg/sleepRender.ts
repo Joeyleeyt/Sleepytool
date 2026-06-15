@@ -451,21 +451,37 @@ async function buildBatchedSleepMaster(
 
 /**
  * Split [0,n) into contiguous [start,end) batch ranges that PREFER scene
- * boundaries. A batch closes when it hits `batchSize` (the memory cap) OR when
- * the next clip starts a new scene and the batch already has at least `minBatch`
- * clips — so the hard-cut seams in the effect-in-batches path land at scene
- * changes, not mid-scene, while staying within the memory budget.
+ * boundaries. A batch grows up to `batchSize` (the memory cap) but closes at the
+ * LAST scene boundary that still leaves it at least `minBatch` clips — so the
+ * hard-cut seams in the effect-in-batches path land on scene changes, and as few
+ * of them as possible (batches stay as large as the budget allows). When a scene
+ * runs longer than `batchSize` there is no boundary to land on, so the batch is
+ * force-closed at the cap (an unavoidable mid-scene cut) to honour the memory
+ * budget. Picking the LAST eligible boundary (not the first past minBatch) is
+ * what keeps batches near batchSize instead of bunching at ~minBatch.
  */
 function sceneAwareRanges(n: number, batchSize: number, sceneStarts: Set<number>): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   const minBatch = Math.max(1, Math.floor(batchSize / 2));
   let start = 0;
+  // Latest scene boundary seen in the current batch that keeps it >= minBatch.
+  let lastSceneCut = -1;
   for (let i = 1; i <= n; i++) {
-    const len = i - start;
-    const sceneCut = i < n && sceneStarts.has(i);
-    if (i === n || len >= batchSize || (sceneCut && len >= minBatch)) {
-      ranges.push([start, i]);
-      start = i;
+    if (i < n && sceneStarts.has(i) && i - start >= minBatch) lastSceneCut = i;
+    if (i === n) {
+      ranges.push([start, n]);
+      break;
+    }
+    if (i - start >= batchSize) {
+      // Prefer the last in-budget scene boundary; fall back to a forced cut at
+      // the cap when the scene is longer than a whole batch. Rewinding to
+      // lastSceneCut can't skip a boundary: any boundary between it and the cap
+      // would already have replaced it as lastSceneCut (it sits past minBatch),
+      // so the skipped indices are all non-boundaries.
+      const end = lastSceneCut > start ? lastSceneCut : i;
+      ranges.push([start, end]);
+      start = end;
+      lastSceneCut = -1;
     }
   }
   return ranges;
@@ -522,7 +538,9 @@ async function buildEffectInBatchesMaster(
     // Clone the slice so the duration adjustment never mutates the shared steps.
     const batch = steps.slice(a, b).map((s) => ({ ...s }));
     // Non-final batch: drop the trailing seam-overlap so the batch is exactly its
-    // clips' narration span (see TIMING above). steps[b].overlapS is o[b+1].
+    // clips' narration span (see TIMING above). `b` is the exclusive end, so the
+    // next batch's first clip is steps[b] and steps[b].overlapS is the overlap it
+    // dissolves over — the tail this batch's last clip would otherwise carry.
     if (b < n) {
       const last = batch[batch.length - 1]!;
       last.durationS = Math.max(0.1, last.durationS - steps[b]!.overlapS);
