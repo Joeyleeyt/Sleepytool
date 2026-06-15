@@ -221,6 +221,15 @@ async function renderSleepMaster(args: {
     '[composite] building sleep crossfade master',
   );
 
+  // Clip indices that start a new script scene — used only by the
+  // effect-in-batches path to align its hard-cut batch seams to scene changes.
+  const sceneBoundaries: number[] = [];
+  for (let i = 1; i < N; i++) {
+    if (shotById.get(clips[i]!.shotId)?.sceneId !== shotById.get(clips[i - 1]!.shotId)?.sceneId) {
+      sceneBoundaries.push(i);
+    }
+  }
+
   await buildSleepMaster({
     clips: sleepClips,
     outPath: args.outPath,
@@ -231,6 +240,7 @@ async function renderSleepMaster(args: {
     maxZoom: SLEEP_KENBURNS_MAX_ZOOM,
     workDir: path.join(WORK_DIR, projectId, 'sleep'),
     concurrency: MIX_CONCURRENCY,
+    sceneBoundaries,
   });
 }
 

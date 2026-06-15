@@ -89,9 +89,23 @@ export interface BuildSleepMasterOpts {
    * (always single chain). Defaults to SLEEP_RENDER_BATCH_SIZE or 80.
    */
   batchSize?: number;
+  /**
+   * Clip indices that START a new script scene (clips[i].sceneId !=
+   * clips[i-1].sceneId). Used ONLY by the effect-in-batches path to break batch
+   * boundaries at scene changes, so the hard-cut seams between batches land where
+   * a cut is natural instead of mid-scene. Ignored by the default xfade-join path.
+   */
+  sceneBoundaries?: number[];
 }
 
 const DEFAULT_MAX_ZOOM = 1.18;
+// Effect-in-batches: bake the grade + ember into the PARALLEL batch encodes and
+// join the finished batches with a stream-copy concat — eliminating the single
+// serial final-join pass (the multi-hour bottleneck). The trade-off is that the
+// batch-boundary transitions become hard CUTS instead of dissolves; we break
+// batches at scene boundaries (sceneBoundaries) so those cuts land naturally.
+// Default OFF (keep the dissolve-everywhere look); enable to cut composite time.
+const EFFECT_IN_BATCHES = (process.env.SLEEP_EFFECT_IN_BATCHES ?? 'false') === 'true';
 // Inputs-per-batch directly drives PEAK RAM: an xfade graph opens every input in
 // the batch and buffers frames across the whole chain. An ~80-input 1080p batch
 // was measured at ~8GB resident and got OOM-killed when two ran together on a
@@ -323,6 +337,14 @@ export async function buildSleepMaster(opts: BuildSleepMasterOpts): Promise<void
     return;
   }
 
+  // FAST PATH (opt-in): bake the finish into each parallel batch and stream-copy
+  // join — drops the serial final-join pass entirely. Seams become hard cuts
+  // (aligned to scene boundaries).
+  if (EFFECT_IN_BATCHES) {
+    await buildEffectInBatchesMaster(steps, batchSize, opts, workDir, finish);
+    return;
+  }
+
   // Long timelines (e.g. 2-hour ≈ 600 clips): render in batches, then
   // crossfade-join the batch masters at their scene seams. See batchSize doc
   // for why this is identical to the single chain.
@@ -425,4 +447,98 @@ async function buildBatchedSleepMaster(
   // The finishing grade + overlay is baked in HERE (the join is the deliverable
   // pass) — not in the per-batch encodes above, which would double-apply it.
   await buildXfadeChain(joinSteps, opts.outPath, { nvenc: opts.nvenc, audio: false, finish });
+}
+
+/**
+ * Split [0,n) into contiguous [start,end) batch ranges that PREFER scene
+ * boundaries. A batch closes when it hits `batchSize` (the memory cap) OR when
+ * the next clip starts a new scene and the batch already has at least `minBatch`
+ * clips — so the hard-cut seams in the effect-in-batches path land at scene
+ * changes, not mid-scene, while staying within the memory budget.
+ */
+function sceneAwareRanges(n: number, batchSize: number, sceneStarts: Set<number>): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const minBatch = Math.max(1, Math.floor(batchSize / 2));
+  let start = 0;
+  for (let i = 1; i <= n; i++) {
+    const len = i - start;
+    const sceneCut = i < n && sceneStarts.has(i);
+    if (i === n || len >= batchSize || (sceneCut && len >= minBatch)) {
+      ranges.push([start, i]);
+      start = i;
+    }
+  }
+  return ranges;
+}
+
+/**
+ * EFFECT-IN-BATCHES assembly (opt-in via SLEEP_EFFECT_IN_BATCHES). Bakes the
+ * finishing grade + ember into each PARALLEL batch encode, then joins the
+ * finished batches with a lossless stream-copy concat — so the single, serial,
+ * multi-hour final-join pass disappears entirely. The expensive per-frame effect
+ * is done once, spread across the batch encoders, instead of once on one core.
+ *
+ * TIMING: the default xfade-join path makes each batch carry a trailing tail
+ * (the seam-overlap the next batch dissolves over). A stream-copy concat does NOT
+ * consume any overlap, so here every batch is rendered to EXACTLY its clips'
+ * narration span: the last clip of each non-final batch drops its trailing
+ * overlap (durationS -= the next batch's first-clip overlap). The within-batch
+ * total is then Σ D of the batch's clips, the concat total is Σ D over all clips
+ * = the narration length, and each clip still lands at its absolute startS — so
+ * the separate narration master stays in sync to the frame.
+ *
+ * SEAMS: the boundary transitions become hard CUTS (concat can't dissolve). We
+ * break batches at scene boundaries so the cuts are natural. The ember "loop
+ * phase" resets at each seam, but a hard cut already changes the whole frame, so
+ * that reset is hidden by the cut (no offset needed).
+ */
+async function buildEffectInBatchesMaster(
+  steps: XfadeStep[],
+  batchSize: number,
+  opts: BuildSleepMasterOpts,
+  workDir: string,
+  finish?: XfadeFinish,
+): Promise<void> {
+  const n = steps.length;
+  const sceneStarts = new Set(opts.sceneBoundaries ?? []);
+  const ranges = sceneAwareRanges(n, batchSize, sceneStarts);
+
+  // Memory cap (same reasoning as buildBatchedSleepMaster) sized on the LARGEST
+  // batch — the effect adds only a small prescaled-ember decode, so the per-clip
+  // estimate still holds.
+  const maxInputs = Math.max(...ranges.map(([a, b]) => b - a));
+  const usableMb = Math.max(1024, os.totalmem() / (1024 * 1024) - RENDER_RESERVE_MEM_MB);
+  const perBatchMb = Math.max(512, maxInputs * BATCH_MEM_PER_CLIP_MB);
+  const memCap = Math.max(1, Math.floor(usableMb / perBatchMb));
+  const batchConcurrency = Math.min(DEFAULT_BATCH_CONCURRENCY, ranges.length, memCap);
+  const batchThreads = Math.max(1, Math.floor(CPU_COUNT / batchConcurrency));
+  // eslint-disable-next-line no-console
+  console.log(
+    `[sleepRender] effect-in-batches: ${n} clips → ${ranges.length} batches (scene-aligned, ≤${batchSize}) ` +
+      `(concurrency ${batchConcurrency}, ${batchThreads} thr/batch, memCap ${memCap}, finish baked, stream-copy join)`,
+  );
+
+  const batchPaths = await mapLimit(ranges, batchConcurrency, async ([a, b], j) => {
+    // Clone the slice so the duration adjustment never mutates the shared steps.
+    const batch = steps.slice(a, b).map((s) => ({ ...s }));
+    // Non-final batch: drop the trailing seam-overlap so the batch is exactly its
+    // clips' narration span (see TIMING above). steps[b].overlapS is o[b+1].
+    if (b < n) {
+      const last = batch[batch.length - 1]!;
+      last.durationS = Math.max(0.1, last.durationS - steps[b]!.overlapS);
+    }
+    const batchPath = path.join(workDir, `fxbatch_${j.toString().padStart(4, '0')}.mp4`);
+    // Bake the finish (grade + ember) into THIS batch's encode — the whole point.
+    await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false, threads: batchThreads, finish });
+    const durationS = await ffprobeDuration(batchPath).catch(() => 0);
+    if (!(durationS > 0)) {
+      throw new Error(`effect-in-batches batch ${j} produced an unprobeable/zero-length master: ${batchPath}`);
+    }
+    return batchPath;
+  });
+
+  // Lossless stream-copy join — instant, no re-encode. Requires every batch to
+  // share codec params, which they do (identical finish encode settings). The
+  // grade+ember are already baked in, so finalEncode still stream-copies.
+  await concatDemuxer(batchPaths, opts.outPath);
 }
