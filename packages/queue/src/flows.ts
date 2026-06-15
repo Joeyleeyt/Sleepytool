@@ -120,6 +120,14 @@ export async function startRenderFlow(projectId: string) {
         name: 'encode',
         queueName: 'render',
         data: { projectId, stage: 'encode' },
+        // Encode is the multi-hour render. It used to have no retry, so a single
+        // transient fault near the end (e.g. a Redis/R2 connection blip, the
+        // EMAXCONN we hit) discarded the whole job and required a manual
+        // re-trigger. The composite + audio stages are now resume-safe (they
+        // reuse a valid master/mix on disk), so a retry is cheap — it skips
+        // straight back to the failed step. Auto-retry transient faults with a
+        // generous backoff instead of dying.
+        opts: { attempts: 3, backoff: { type: 'exponential', delay: 60_000 } },
         children: [
           {
             name: 'mixAudio',

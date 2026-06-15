@@ -111,21 +111,26 @@ function buildConcatNarration(narration: MixTrack[], totalDurS: number): string[
     .map((t, i) => ({ t, i }))
     .sort((a, b) => a.t.startS - b.t.startS);
 
+  // `concat` requires EVERY segment to share the same sample format, channel
+  // layout AND sample rate — otherwise it errors. Pin all of them (silence and
+  // tracks alike) to the identical fltp/mono/48k so the join is always valid
+  // regardless of each narration source's native format.
+  const AFMT = 'aformat=sample_fmts=fltp:channel_layouts=mono:sample_rates=48000';
+
   const segLabels: string[] = [];
   let cursor = 0;
   let silenceN = 0;
   const silence = (durS: number): void => {
     if (durS <= 0.0005) return;
     const lbl = `sil${silenceN++}`;
-    filters.push(`anullsrc=channel_layout=mono:sample_rate=48000:duration=${durS.toFixed(3)}[${lbl}]`);
+    filters.push(`anullsrc=channel_layout=mono:sample_rate=48000:duration=${durS.toFixed(3)},${AFMT}[${lbl}]`);
     segLabels.push(`[${lbl}]`);
   };
 
   for (const { t, i } of order) {
     silence(t.startS - cursor); // gap before this track
     filters.push(
-      `[${i}:a]aresample=48000,atrim=0:${t.durationS},asetpts=PTS-STARTPTS,volume=${t.gainDb}dB,` +
-        `aformat=channel_layouts=mono:sample_rates=48000[t${i}]`,
+      `[${i}:a]aresample=48000,atrim=0:${t.durationS},asetpts=PTS-STARTPTS,volume=${t.gainDb}dB,${AFMT}[t${i}]`,
     );
     segLabels.push(`[t${i}]`);
     cursor = t.startS + t.durationS;

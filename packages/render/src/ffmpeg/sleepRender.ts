@@ -409,8 +409,14 @@ async function buildBatchedSleepMaster(
     const batchPath = path.join(workDir, `batch_${b.toString().padStart(4, '0')}.mp4`);
     await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false, threads: batchThreads });
     // Probe the real master length so join offsets use measured, not computed,
-    // durations (immune to any per-clip frame-rounding inside the batch).
+    // durations (immune to any per-clip frame-rounding inside the batch). A zero
+    // here would silently corrupt every downstream join offset, so fail loudly
+    // instead of defaulting to 0 — the batch master was just written, so an
+    // unprobeable result means something is genuinely wrong.
     const durationS = await ffprobeDuration(batchPath).catch(() => 0);
+    if (!(durationS > 0)) {
+      throw new Error(`sleep batch ${b} produced an unprobeable/zero-length master: ${batchPath}`);
+    }
     return { path: batchPath, durationS, xfade: 'fade', overlapS: seamOverlapS } as XfadeStep;
   });
 
