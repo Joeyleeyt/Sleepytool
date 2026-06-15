@@ -96,12 +96,18 @@ primary_region = 'lhr'
   # CPU-bound ffmpeg (no GPU/NVENC). Two encode-heavy stages: the parallel Ken
   # Burns image segments, and the crossfade assembly — whose FINAL (xfade-join)
   # pass bakes in the global cinematic grade + rising-ember overlay, so the final
-  # encode then just stream-copies (one re-encode, not two). 8 cores at
-  # FFMPEG_X264_PRESET='veryfast' (see [env]) keep both tractable; 16gb covers ~8
-  # parallel 1080p zoompan encodes plus the batch xfade joins (run
-  # SLEEP_BATCH_CONCURRENCY at a time, default 2) with room to spare. Set
-  # CINEMATIC_GRADE='false' + CINEMATIC_OVERLAY='off' to skip the finishing pass
-  # entirely (instant stream-copy throughout).
+  # encode then just stream-copies (one re-encode, not two). Both stages are
+  # FILTER-bound (zoompan + xfade are single-threaded in ffmpeg). Prep saturates
+  # cores by running one ffmpeg PER CORE (RENDER_MIX_CONCURRENCY=cores-1 ×
+  # FFMPEG_INTERMEDIATE_THREADS=1). The batch xfade masters are bounded by RAM, not
+  # cores: an ~80-input batch needs ~8gb, so the renderer auto-caps how many run at
+  # once to fit (totalmem − reserve) and ships a smaller default batch
+  # (SLEEP_RENDER_BATCH_SIZE=40, ~4gb each) — on 16gb that's ~3 batches in
+  # parallel. This is what stops the OOM-kill → silent full-render-restart loop;
+  # do NOT raise SLEEP_BATCH_CONCURRENCY/SLEEP_RENDER_BATCH_SIZE without adding RAM.
+  # The single-threaded FINAL join over the whole film remains the one serial stage
+  # — NVENC on a GPU box is the real lever for it. Set CINEMATIC_GRADE='false' +
+  # CINEMATIC_OVERLAY='off' to skip the finishing pass entirely (stream-copy).
   size = 'performance-8x'
   memory = '16gb'
   processes = ['render']

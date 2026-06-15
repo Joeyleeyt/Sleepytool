@@ -1,10 +1,11 @@
+import os from 'node:os';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ffmpeg, ffprobeDuration, extractLastFrame } from './run.js';
 import { buildXfadeChain, concatDemuxer, type XfadeStep, type XfadeFinish } from './concat.js';
 import { isImageInput } from './shotComposite.js';
 import { kenBurnsFilter, type KenBurnsMode } from './kenBurns.js';
-import { cinematicGrade, coverScaleCrop, isCinematicGradeEnabled, planEmberOverlay } from './filters.js';
+import { cinematicGrade, coverScaleCrop, ensureEmberPlate, isCinematicGradeEnabled, planEmberOverlay } from './filters.js';
 
 /**
  * Directions a still cycles through so consecutive stills never move the same
@@ -91,13 +92,26 @@ export interface BuildSleepMasterOpts {
 }
 
 const DEFAULT_MAX_ZOOM = 1.18;
-const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 80);
-// How many batch sub-masters to render concurrently. Batches are independent —
-// each is its own xfade master and only the final join needs them all — so on a
-// multi-core box several can encode at once. Each xfade ffmpeg is itself
-// multi-threaded, so keep this modest to avoid oversubscription; 2 is the safe
-// default on an 8 vCPU render machine. <=1 restores the old sequential behaviour.
-const DEFAULT_BATCH_CONCURRENCY = Math.max(1, Number(process.env.SLEEP_BATCH_CONCURRENCY ?? 2));
+// Inputs-per-batch directly drives PEAK RAM: an xfade graph opens every input in
+// the batch and buffers frames across the whole chain. An ~80-input 1080p batch
+// was measured at ~8GB resident and got OOM-killed when two ran together on a
+// 16GB box (→ lock lost → the whole render silently restarted). Memory scales
+// ~linearly with the input count, so a SMALLER batch is the lever that both caps
+// per-batch RAM and lets several run in parallel. 40 ≈ ~4GB/batch. More batches
+// only enlarges the (tiny) final join graph. <=0 disables batching.
+const DEFAULT_BATCH_SIZE = Number(process.env.SLEEP_RENDER_BATCH_SIZE ?? 40);
+const CPU_COUNT = Math.max(1, os.cpus()?.length ?? 4);
+// Upper bound on parallel batch encoders. The xfade chain's filter is SINGLE-
+// THREADED, so more cores only help via more concurrent batches — BUT memory, not
+// CPU, is the real limit here (see the memCap in buildBatchedSleepMaster). This is
+// just the ceiling; leave one core for the event loop / BullMQ lock heartbeat.
+const DEFAULT_BATCH_CONCURRENCY = Math.max(1, Number(process.env.SLEEP_BATCH_CONCURRENCY ?? CPU_COUNT - 1));
+// Estimated per-input RAM of an xfade batch (MB) and RAM to hold back for Node +
+// OS + page cache. Used to cap batch concurrency so the pool can NEVER exceed
+// physical RAM — the OOM-kill → silent-restart loop is far worse than running a
+// touch more serially. Both overridable for bigger/smaller boxes.
+const BATCH_MEM_PER_CLIP_MB = Math.max(1, Number(process.env.SLEEP_BATCH_MEM_PER_CLIP_MB ?? 110));
+const RENDER_RESERVE_MEM_MB = Math.max(512, Number(process.env.SLEEP_RENDER_RESERVE_MEM_MB ?? 3072));
 // Below this, a video is treated as "fully covers its slot" and just trimmed —
 // avoids producing a sub-frame freeze tail for rounding noise.
 const FREEZE_EPSILON_S = 0.08;
@@ -121,13 +135,15 @@ function intermediateEncodeArgs(nvenc: boolean): string[] {
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '20';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '20';
-  // Cap threads PER encode. Many of these run in parallel (MIX_CONCURRENCY), so
-  // letting each libx264 auto-grab every core oversubscribes the scheduler and
-  // slows the whole prep phase. ≈ cores / concurrency is ideal; default 2 (so the
-  // 8 vCPU box runs ~4 encodes × 2 threads = 8). '0' lets x264 auto-pick (one
-  // thread per core) for the single-encode case. Thread count does NOT affect
-  // output quality — only encode speed/determinism — so this is a free speedup.
-  const x264Threads = process.env.FFMPEG_INTERMEDIATE_THREADS ?? '2';
+  // Cap threads PER encode. This prep phase is filter-bound (zoompan is single-
+  // threaded), and MIX_CONCURRENCY now runs one ffmpeg PER CORE, so each encode
+  // should take a SINGLE thread — concurrency × threads then equals the core
+  // count with no oversubscription, and every core stays busy on its own clip's
+  // zoompan. (Previously 2 threads × 4 procs; now 1 thread × CPU_COUNT procs —
+  // same total threads, ~2× the parallel zoompan filters.) '0' lets x264
+  // auto-pick (one thread per core) for the single-encode case. Thread count does
+  // NOT affect output quality — only speed/determinism — so this is free.
+  const x264Threads = process.env.FFMPEG_INTERMEDIATE_THREADS ?? '1';
   const threadArgs = x264Threads !== '0' ? ['-threads', x264Threads] : [];
   return nvenc
     ? ['-c:v', 'h264_nvenc', '-preset', nvencPreset, '-cq', nvencCq]
@@ -298,7 +314,8 @@ export async function buildSleepMaster(opts: BuildSleepMasterOpts): Promise<void
   const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
   // Resolve the finishing look ONCE and bake it into the final pass (below) so
   // finalEncode can stream-copy instead of running a second full re-encode.
-  const finish = resolveFinish(opts);
+  // (async: it pre-scales the ember plate to target res once — see resolveFinish.)
+  const finish = await resolveFinish(opts);
 
   // Short timelines: one xfade graph is fine and avoids the extra re-encode.
   if (batchSize <= 0 || steps.length <= batchSize) {
@@ -320,9 +337,20 @@ export async function buildSleepMaster(opts: BuildSleepMasterOpts): Promise<void
  * when both are off: the master is then a plain encode and finalEncode
  * stream-copies it (the fast review-render path).
  */
-function resolveFinish(opts: BuildSleepMasterOpts): XfadeFinish | undefined {
+async function resolveFinish(opts: BuildSleepMasterOpts): Promise<XfadeFinish | undefined> {
   const grade = isCinematicGradeEnabled() ? cinematicGrade() : null;
-  const overlay = planEmberOverlay(opts.width, opts.height, opts.fps);
+  // Pre-scale the 4K ember plate to target res once (cached in the work dir) so
+  // the finishing pass doesn't decode+scale 4K every frame. Best-effort: any
+  // failure falls back to null → planEmberOverlay uses the raw 4K asset (the
+  // original, slower-but-working path), so this can never break a render.
+  const workDir = opts.workDir ?? path.dirname(opts.outPath);
+  const plate = await ensureEmberPlate(
+    opts.width,
+    opts.height,
+    opts.fps,
+    path.join(workDir, 'fxcache'),
+  ).catch(() => null);
+  const overlay = planEmberOverlay(opts.width, opts.height, opts.fps, { plate: plate ?? undefined });
   if (!grade && !overlay) return undefined;
   return { grade, overlay, width: opts.width, height: opts.height };
 }
@@ -351,10 +379,24 @@ async function buildBatchedSleepMaster(
   finish?: XfadeFinish,
 ): Promise<void> {
   const batches = chunk(steps, batchSize);
-  const batchConcurrency = Math.min(DEFAULT_BATCH_CONCURRENCY, batches.length);
+  // MEMORY CAP — the one that prevents the OOM-kill → silent-restart loop. Peak
+  // RAM ≈ perBatch × concurrency, and a batch's RAM tracks its input count, so we
+  // run only as many at once as fit in (totalmem − reserve). This caps below the
+  // CPU-based ceiling whenever memory is the tighter constraint (it usually is).
+  const realBatchInputs = batches[0]?.length ?? batchSize;
+  const usableMb = Math.max(1024, os.totalmem() / (1024 * 1024) - RENDER_RESERVE_MEM_MB);
+  const perBatchMb = Math.max(512, realBatchInputs * BATCH_MEM_PER_CLIP_MB);
+  const memCap = Math.max(1, Math.floor(usableMb / perBatchMb));
+  const batchConcurrency = Math.min(DEFAULT_BATCH_CONCURRENCY, batches.length, memCap);
+  // Per-batch libx264 thread budget so the concurrent batch encoders share the
+  // cores instead of each grabbing all of them (N×cores threads thrashing). The
+  // xfade filter is single-threaded and is the bottleneck, so flooring at 1 is
+  // fine; when few batches run, each gets proportionally more threads.
+  const batchThreads = Math.max(1, Math.floor(CPU_COUNT / batchConcurrency));
   // eslint-disable-next-line no-console
   console.log(
-    `[sleepRender] batched master: ${steps.length} clips → ${batches.length} batches of ≤${batchSize} (concurrency ${batchConcurrency})`,
+    `[sleepRender] batched master: ${steps.length} clips → ${batches.length} batches of ≤${batchSize} ` +
+      `(concurrency ${batchConcurrency}, ${batchThreads} thr/batch, memCap ${memCap}, ~${Math.round(perBatchMb)}MB/batch)`,
   );
 
   // Render the batches to their own crossfade masters. They're independent, so a
@@ -365,7 +407,7 @@ async function buildBatchedSleepMaster(
   const joinSteps = await mapLimit(batches, batchConcurrency, async (batch, b) => {
     const seamOverlapS = batch[0]!.overlapS; // crossfadeInS of this batch's first clip (0 for batch 0)
     const batchPath = path.join(workDir, `batch_${b.toString().padStart(4, '0')}.mp4`);
-    await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false });
+    await buildXfadeChain(batch, batchPath, { nvenc: opts.nvenc, audio: false, threads: batchThreads });
     // Probe the real master length so join offsets use measured, not computed,
     // durations (immune to any per-clip frame-rounding inside the batch).
     const durationS = await ffprobeDuration(batchPath).catch(() => 0);

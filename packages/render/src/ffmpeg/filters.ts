@@ -7,7 +7,11 @@
  * the whole timeline.
  */
 
+import { existsSync } from 'node:fs';
+import { mkdir } from 'node:fs/promises';
+import path from 'node:path';
 import { FX, fxExists, fxPath } from '../fxLibrary.js';
+import { ffmpeg } from './run.js';
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
@@ -144,7 +148,54 @@ export interface EmberOverlayPlan {
  * In RGB the overlay's black is (0,0,0) and screen(base, 0) = base, so unlit
  * areas are untouched and only the embers add warm light.
  */
-export function planEmberOverlay(width: number, height: number, fps: number): EmberOverlayPlan | null {
+/**
+ * Pre-scale the (4K) ember plate to the target frame size ONCE, cached on disk,
+ * so the finishing pass stops decoding 4K + resizing 4K→target on every one of
+ * ~224k frames (the dominant cost of the multi-hour grade+ember pass). The plate
+ * is encoded yuv444p near-lossless so its colour is identical to the 4K path
+ * (which scales then converts to gbrp); the screen blend uses RGB only.
+ *
+ * Returns the cached plate path, or null when there's nothing to pre-scale
+ * (overlay off, asset missing, a non-asset overlay mode, or disabled via
+ * CINEMATIC_EMBER_PRESCALE=false). Pass the result to planEmberOverlay({ plate }).
+ * On any failure the caller should fall back to null (the raw-4K path still works).
+ */
+export async function ensureEmberPlate(
+  width: number,
+  height: number,
+  fps: number,
+  cacheDir: string,
+): Promise<string | null> {
+  if (process.env.CINEMATIC_EMBER_PRESCALE === 'false') return null;
+  const mode = overlayMode();
+  if (mode !== 'embers' && mode !== 'auto') return null; // only the asset-based path scales 4K
+  const level = (process.env.CINEMATIC_OVERLAY_LEVEL ?? 'subtle') as keyof typeof FX.embers;
+  const assetRel = FX.embers[level] ?? FX.embers.subtle;
+  if (!fxExists(assetRel)) return null;
+
+  const out = path.join(cacheDir, `ember_plate_${width}x${height}_${fps}_${level}.mp4`);
+  if (existsSync(out)) return out;
+  await mkdir(cacheDir, { recursive: true });
+  // yuv444p + low CRF keeps the plate visually lossless (it's a tiny 30s clip);
+  // -an because the overlay is video-only.
+  await ffmpeg([
+    '-y',
+    '-i', fxPath(assetRel),
+    '-vf', `${coverScaleCrop(width, height, fps)},format=yuv444p`,
+    '-an',
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '12', '-pix_fmt', 'yuv444p',
+    '-movflags', '+faststart',
+    out,
+  ]);
+  return out;
+}
+
+export function planEmberOverlay(
+  width: number,
+  height: number,
+  fps: number,
+  opts: { plate?: string } = {},
+): EmberOverlayPlan | null {
   const mode = overlayMode();
   if (mode === 'off') return null;
 
@@ -155,11 +206,19 @@ export function planEmberOverlay(width: number, height: number, fps: number): Em
 
   if (useAsset && assetThere) {
     const alpha = clamp(Number(process.env.CINEMATIC_OVERLAY_ALPHA ?? '0.15'), 0, 1);
+    // PERF: when a pre-scaled plate (already at the target frame size) is supplied
+    // we drop the per-frame `coverScaleCrop` — that scale was decoding a 4K plate
+    // and resizing 4K→target on EVERY frame, the dominant cost of the multi-hour
+    // finishing pass. Quality-neutral: the plate is the same image at the output
+    // resolution, and the screen blend uses RGB only (alpha is irrelevant). See
+    // ensureEmberPlate. Falls back to the raw 4K asset when no plate is given.
+    const src = opts.plate ?? fxPath(assetRel);
+    const srcScale = opts.plate ? '' : `${coverScaleCrop(width, height, fps)},`;
     return {
       kind: 'embers',
-      inputArgs: ['-stream_loop', '-1', '-i', fxPath(assetRel)],
+      inputArgs: ['-stream_loop', '-1', '-i', src],
       build: (inLabel, outLabel, idx) =>
-        `[${idx}:v]${coverScaleCrop(width, height, fps)},format=gbrp[ovsrc];` +
+        `[${idx}:v]${srcScale}format=gbrp[ovsrc];` +
         `[${inLabel}]format=gbrp[ovbase];` +
         `[ovbase][ovsrc]blend=all_mode=screen:all_opacity=${alpha}:shortest=1,format=yuv420p[${outLabel}]`,
     };

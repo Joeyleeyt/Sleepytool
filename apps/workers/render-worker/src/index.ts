@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { Worker } from 'bullmq';
 import pino from 'pino';
@@ -21,6 +22,7 @@ import {
   finalEncode,
   mixAudio,
   extractLastFrame,
+  ffprobeDuration,
   isImageInput,
   buildSleepMaster,
   type KenBurnsMode,
@@ -74,12 +76,22 @@ const SHOT_CONCURRENCY = Math.max(
   Number(process.env.RENDER_SHOT_CONCURRENCY ?? Math.min(8, Math.max(2, Math.ceil(CPU_COUNT / 2)))),
 );
 // How many mix segments to prepare at once (image Ken Burns encodes + video
-// stream-copies). Same oversubscription reasoning as SHOT_CONCURRENCY — each
-// ffmpeg is multi-threaded, so ~half the cores fills the pipeline. Separate
-// knob so the mixer can be tuned independently; defaults to SHOT_CONCURRENCY.
+// normalize). This phase is FILTER-bound, not encode-bound: ffmpeg's zoompan
+// (Ken Burns) and scale filters are SINGLE-THREADED, so the extra libx264 encode
+// threads sit idle while the filter is the real bottleneck. The way to use all
+// cores here is therefore one ffmpeg process PER CORE (each with a single encode
+// thread), NOT a few processes with many threads each — the opposite of the
+// encode-bound tuning. Default to CPU_COUNT and pair with
+// FFMPEG_INTERMEDIATE_THREADS=1 (its default) so concurrency × threads ≈ cores.
+// On the 8-vCPU box this turns the silent ~85-min prep phase into ~7 cores busy
+// on zoompan instead of ~4. We deliberately leave ONE core free (CPU_COUNT - 1):
+// pinning every core starves the Node event loop and the BullMQ lock-renewal
+// heartbeat misses its window → "could not renew lock" → the job stalls and is
+// thrown away. The reserved core keeps that heartbeat alive. Override with
+// RENDER_MIX_CONCURRENCY.
 const MIX_CONCURRENCY = Math.max(
   1,
-  Number(process.env.RENDER_MIX_CONCURRENCY ?? SHOT_CONCURRENCY),
+  Number(process.env.RENDER_MIX_CONCURRENCY ?? CPU_COUNT - 1),
 );
 // Asset downloads are I/O-bound, so we can fan out wider than the encode pool.
 const DOWNLOAD_CONCURRENCY = Math.max(1, Number(process.env.RENDER_DOWNLOAD_CONCURRENCY ?? 8));
@@ -260,6 +272,36 @@ async function runComposite(projectId: string) {
     if (SLEEP_RENDER) {
       const masterPath = path.join(WORK_DIR, projectId, 'composited_master.mp4');
       await mkdir(path.dirname(masterPath), { recursive: true });
+
+      // CHECKPOINT / RESUME — the composite is the multi-hour stage, and the
+      // `encode` job re-runs it from scratch on any retry/stall (it has no other
+      // idempotency). If a previous run already produced a master whose probed
+      // duration matches the timeline (within 1s), reuse it and skip straight to
+      // audio + final encode. This turns a stall near the end of a 6-hour render
+      // from "redo everything" into "resume in seconds". Set
+      // COMPOSITE_RESUME=false to always re-render (e.g. after changing the look).
+      if (process.env.COMPOSITE_RESUME !== 'false' && existsSync(masterPath)) {
+        const have = await ffprobeDuration(masterPath).catch(() => 0);
+        if (have > 0 && Math.abs(have - tl.totalDurationS) <= 1) {
+          log.info(
+            { projectId, masterPath, durationS: have, expectedS: tl.totalDurationS },
+            '[composite] reusing existing valid master (resume) — skipping re-render',
+          );
+          await projectsRepo.setStatus(projectId, 'composited');
+          await eventsRepo.emit(projectId, 'composite', 'render_succeeded', {
+            masterPath,
+            totalMs: Date.now() - t0,
+            shots: tl.clips.length,
+            resumed: true,
+          });
+          return masterPath;
+        }
+        log.info(
+          { projectId, haveS: have, expectedS: tl.totalDurationS },
+          '[composite] existing master incomplete/mismatched — re-rendering',
+        );
+      }
+
       await renderSleepMaster({
         projectId,
         tl,
@@ -371,6 +413,31 @@ async function runAudioMix(projectId: string): Promise<string> {
   try {
     const tlRow = await timelinesRepo.findByProject(projectId);
     if (!tlRow) throw new Error('timeline not built');
+    const totalDurS = Number(tlRow.totalDurS);
+    const out = path.join(WORK_DIR, projectId, 'mixed.wav');
+    await mkdir(path.dirname(out), { recursive: true });
+
+    // CHECKPOINT / RESUME — mirror the composite resume: if a valid full-length
+    // mix already exists, reuse it and skip the (multi-minute) download + re-mix.
+    // This makes a late-stage failure (e.g. the final encode) recoverable in
+    // seconds instead of re-mixing 500+ tracks. COMPOSITE_RESUME=false forces a
+    // fresh mix.
+    if (process.env.COMPOSITE_RESUME !== 'false' && existsSync(out)) {
+      const have = await ffprobeDuration(out).catch(() => 0);
+      if (have > 0 && Math.abs(have - totalDurS) <= 1) {
+        log.info(
+          { projectId, out, durationS: have, expectedS: totalDurS },
+          '[audioMix] reusing existing valid mix (resume) — skipping re-mix',
+        );
+        await eventsRepo.emit(projectId, 'audio', 'render_succeeded', {
+          out,
+          totalMs: Date.now() - t0,
+          resumed: true,
+        });
+        return out;
+      }
+    }
+
     const tl = tlRow.edlJson as { clips: TimelineClip[]; musicBeds: Timeline['musicBeds'] };
     const assets = await assetsRepo.findByProject(projectId);
     const assetById = new Map(assets.map((a) => [a.id, a]));
@@ -382,26 +449,27 @@ async function runAudioMix(projectId: string): Promise<string> {
       { projectId, clips: tl.clips.length, narrated: narratedClips.length },
       '[audioMix] downloading narration',
     );
-    const narration = await Promise.all(
-      narratedClips.map(async (c) => ({
-        path: await localFor(assetById.get(c.narrationAssetId!)!.r2Key),
-        startS: c.startS,
-        durationS: c.endS - c.startS,
-        gainDb: 0,
-      })),
-    );
+    // BOUND the narration downloads. An unbounded Promise.all over ~500 clips
+    // opened 500+ simultaneous R2 connections (the "@smithy socket usage at
+    // capacity" warning → "(EMAXCONN) max client connections reached, limit: 200"
+    // that failed the whole job AFTER the mix finished). Cap exactly like the
+    // composite prefetch does (DOWNLOAD_CONCURRENCY, default 8).
+    const narration = await mapLimit(narratedClips, DOWNLOAD_CONCURRENCY, async (c) => ({
+      path: await localFor(assetById.get(c.narrationAssetId!)!.r2Key),
+      startS: c.startS,
+      durationS: c.endS - c.startS,
+      gainDb: 0,
+    }));
 
     // Music beds — if the asset id is a `music:mood` placeholder, skip (real
     // implementation looks up a curated R2 bucket of mood beds).
-    const music = [] as Awaited<ReturnType<typeof Promise.all<typeof narration>>>;
+    const music: typeof narration = [];
 
-    const out = path.join(WORK_DIR, projectId, 'mixed.wav');
-    await mkdir(path.dirname(out), { recursive: true });
     log.info({ projectId, narrationTracks: narration.length }, '[audioMix] mixing');
     await mixAudio({
       narration,
       music,
-      totalDurS: Number(tlRow.totalDurS),
+      totalDurS,
       outPath: out,
     });
     await eventsRepo.emit(projectId, 'audio', 'render_succeeded', {
@@ -511,6 +579,23 @@ async function runFinalEncode(
   }
 }
 
+// Render jobs are multi-HOUR, fully CPU-bound ffmpeg pipelines. BullMQ holds a
+// per-job lock the worker must RENEW on a timer (every lockDuration/2) by pinging
+// Redis; if a renewal can't reach Redis within `lockDuration`, BullMQ declares the
+// job "stalled" and re-runs or fails it — throwing away hours of work.
+//
+// The default 30s lock is far too tight here: during the long crossfade-encode
+// passes the box is pinned by ffmpeg with no process churn, so the Node event
+// loop is CPU-STARVED and the 15s renewal timer drifts past 30s → "could not
+// renew lock for job". (Phase-1 prep survives because its 100s of SHORT ffmpegs
+// keep yielding to the loop; the long batch/join encodes do not.)
+//
+// Fix: a generous 10-min lock so even a badly lagged event loop renews in time
+// (renewal still fires every ~5 min), a matching stalled-scan interval, and a
+// higher maxStalledCount so a single transient miss recovers instead of failing
+// the whole render. Paired with reserving a CPU core for the loop (see
+// CPU_COUNT-1 pool sizing) so the heartbeat actually gets scheduled.
+const RENDER_LOCK_MS = Math.max(60_000, Number(process.env.RENDER_LOCK_DURATION_MS ?? 600_000));
 const worker = new Worker(
   'render',
   async (job) => {
@@ -534,7 +619,17 @@ const worker = new Worker(
       }
     }
   },
-  { connection, concurrency: 1 },
+  {
+    connection,
+    concurrency: 1,
+    lockDuration: RENDER_LOCK_MS,
+    // Scan for stalled jobs no more often than the lock half-life; cheap on Redis
+    // and there's only ever one render job in flight on this machine.
+    stalledInterval: Math.floor(RENDER_LOCK_MS / 2),
+    // Tolerate a couple of transient renewal misses before failing a multi-hour
+    // job (default 1 = a single miss kills it).
+    maxStalledCount: 3,
+  },
 );
 
 worker.on('completed', (job) => {

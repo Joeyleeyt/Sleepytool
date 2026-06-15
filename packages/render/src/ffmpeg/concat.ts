@@ -55,7 +55,7 @@ export interface XfadeFinish {
 export async function buildXfadeChain(
   steps: XfadeStep[],
   outPath: string,
-  opts: { nvenc?: boolean; audio?: boolean; finish?: XfadeFinish },
+  opts: { nvenc?: boolean; audio?: boolean; finish?: XfadeFinish; threads?: number },
 ): Promise<void> {
   // The sleep renderer drives a VIDEO-ONLY master (narration is a separate audio
   // master muxed in at finalEncode), so audio acrossfade is opt-out. Defaults to
@@ -158,14 +158,36 @@ export async function buildXfadeChain(
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? (hasFinish ? '21' : '22');
   const profileArgs = hasFinish ? ['-profile:v', 'high', '-level:v', '4.2'] : [];
   const audioArgs = audio ? ['-map', `[${prevA}]`, '-c:a', 'aac', '-b:a', '192k'] : ['-an'];
+  // Cap libx264 threads PER process when the caller runs MANY of these at once
+  // (batch sub-masters: SLEEP_BATCH_CONCURRENCY in parallel). Without a cap each
+  // libx264 grabs one thread per core, so N concurrent encodes spawn N×cores
+  // threads and thrash the scheduler — AND starve the Node event loop enough to
+  // break the BullMQ lock heartbeat. The xfade FILTER is single-threaded and is
+  // the real bottleneck anyway, so a small cap costs almost nothing. NVENC has no
+  // such CPU-thread contention, and the single deliverable pass passes no cap so
+  // it keeps every core.
+  const threadArgs =
+    !opts.nvenc && opts.threads && opts.threads > 0 ? ['-threads', String(opts.threads)] : [];
+  // The FINISHING pass runs SOLO (no parallel batch lanes competing), and its
+  // grade/blend filters are slice-threadable, so it can spread the filtergraph
+  // across the otherwise-idle cores. ffmpeg's default isn't always aggressive
+  // here, so allow an explicit override via FFMPEG_FILTER_THREADS (opt-in; only
+  // applied on the finish pass — never on the parallel batches, which must stay
+  // thread-capped). Must precede -filter_complex.
+  const filterThreadArgs =
+    hasFinish && process.env.FFMPEG_FILTER_THREADS
+      ? ['-filter_complex_threads', process.env.FFMPEG_FILTER_THREADS]
+      : [];
   const build = (nvenc: boolean): string[] => [
     ...inputs,
     ...extraInputs,
+    ...filterThreadArgs,
     '-filter_complex', filterGraph,
     '-map', `[${finalV}]`,
     ...audioArgs,
     '-c:v', nvenc ? 'h264_nvenc' : 'libx264',
     ...(nvenc ? ['-preset', nvencPreset, '-cq', nvencCq] : ['-preset', x264Preset, '-crf', x264Crf]),
+    ...(nvenc ? [] : threadArgs),
     ...profileArgs,
     '-pix_fmt', 'yuv420p',
     '-movflags', '+faststart',

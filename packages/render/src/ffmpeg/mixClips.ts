@@ -63,7 +63,7 @@ function intermediateEncodeArgs(nvenc: boolean, capThreads = false): string[] {
   const x264Crf = process.env.FFMPEG_INTERMEDIATE_CRF ?? process.env.FFMPEG_X264_CRF ?? '20';
   const nvencPreset = process.env.FFMPEG_NVENC_PRESET ?? 'p6';
   const nvencCq = process.env.FFMPEG_NVENC_CQ ?? '20';
-  const x264Threads = process.env.FFMPEG_INTERMEDIATE_THREADS ?? '2';
+  const x264Threads = process.env.FFMPEG_INTERMEDIATE_THREADS ?? '1';
   const threadArgs = capThreads && x264Threads !== '0' ? ['-threads', x264Threads] : [];
   return nvenc
     ? ['-c:v', 'h264_nvenc', '-preset', nvencPreset, '-cq', nvencCq]
