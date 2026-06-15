@@ -44,6 +44,14 @@ primary_region = 'lhr'
   SLEEP_KENBURNS_MAX_ZOOM = '1.04'          # 4% push over a clip — clearly visible
                                             # zoom/pan motion the client asked for
                                             # (was 1.02 = imperceptible 2%)
+  # Bake the grade + ember into the PARALLEL batch encodes and stream-copy-join
+  # them, dropping the serial multi-hour final-join pass. Composite ~3-3.5h ->
+  # ~2-2.5h on this CPU VM. Trade-off: the ~13 batch seams become hard CUTS
+  # (scene-aligned where a scene fits in one batch; a scene longer than
+  # SLEEP_RENDER_BATCH_SIZE clips takes one unavoidable mid-scene cut). The
+  # hundreds of within-batch dissolves are unchanged. A/B vs dissolve-everywhere;
+  # needs a FRESH project (or COMPOSITE_RESUME='false') to actually re-render.
+  SLEEP_EFFECT_IN_BATCHES = 'true'
 
   # --- Visual pacing (classify stage) ---
   # Each visual "block" runs longer so the picture holds still; short sentences
