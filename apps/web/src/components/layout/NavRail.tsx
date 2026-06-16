@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Library, ListChecks, Palette, KeyRound, Settings, HelpCircle, CircleUser, Flame } from 'lucide-react';
+import { Home, Library, ListChecks, Palette, KeyRound, Settings, HelpCircle, CircleUser, Flame, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Item {
@@ -41,8 +41,28 @@ export function NavRail() {
         {BOTTOM.map((it) => (
           <NavItem key={it.href} item={it} active={isActive(path, it.href)} />
         ))}
+        <LogoutButton />
       </div>
     </nav>
+  );
+}
+
+function LogoutButton() {
+  async function logout() {
+    await fetch('/api/login', { method: 'DELETE' }).catch(() => {});
+    // Full navigation so the cleared cookie takes effect and middleware bounces
+    // us to /login.
+    window.location.assign('/login');
+  }
+  return (
+    <button
+      type="button"
+      onClick={logout}
+      title="Log out"
+      className="w-10 h-10 grid place-items-center rounded-md text-text-dim hover:text-text hover:bg-bg-elev transition-colors"
+    >
+      <LogOut size={18} />
+    </button>
   );
 }
 

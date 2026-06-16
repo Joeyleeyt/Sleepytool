@@ -8,6 +8,7 @@ export * from './repos/shots.js';
 export * from './repos/prompts.js';
 export * from './repos/generations.js';
 export * from './repos/apiKeys.js';
+export * from './repos/auth.js';
 export * from './repos/assets.js';
 export * from './repos/timelines.js';
 export * from './repos/visualMemory.js';

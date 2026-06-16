@@ -210,3 +210,15 @@ CREATE TABLE IF NOT EXISTS project_events (
   payload    JSONB,
   ts         TIMESTAMPTZ DEFAULT now()
 );
+
+-- auth_credential — the single shared operator password for the web console.
+-- One row only (id pinned to 'singleton'). Bootstrapped from APP_PASSWORD on
+-- first login, then changeable at runtime. Stores a salted scrypt hash only;
+-- plaintext never touches the DB.
+CREATE TABLE IF NOT EXISTS auth_credential (
+  id            TEXT PRIMARY KEY DEFAULT 'singleton' CHECK (id = 'singleton'),
+  password_hash TEXT NOT NULL,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE auth_credential ENABLE ROW LEVEL SECURITY;
