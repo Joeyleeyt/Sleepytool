@@ -15,8 +15,8 @@ export default function AccountPage() {
           <CircleUser size={18} className="text-ember-500" />
           <h1 className="font-display text-base font-semibold ml-2">Account</h1>
         </header>
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-md mx-auto p-6">
+        <div className="flex-1 overflow-y-auto grid place-items-center p-6">
+          <div className="w-full max-w-md">
             <ChangePasswordForm />
           </div>
         </div>
