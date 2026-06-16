@@ -24,13 +24,29 @@ function isPublic(pathname: string): boolean {
 
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
-  if (isPublic(pathname)) return NextResponse.next();
 
   const secret = process.env.AUTH_SECRET;
   const token = req.cookies.get(SESSION_COOKIE)?.value;
-  if (secret && token && (await verifySessionToken(token, secret, Date.now()))) {
-    return NextResponse.next();
+  const authed = !!(secret && token && (await verifySessionToken(token, secret, Date.now())));
+
+  // The login page is public, BUT an already-authenticated visitor (e.g. one who
+  // hits the browser Back button after logging in) should never see it — bounce
+  // them to the dashboard instead. The no-store header stops the back/forward
+  // cache from restoring a stale login page without re-running this check.
+  if (pathname === '/login') {
+    if (authed) {
+      const url = req.nextUrl.clone();
+      url.pathname = '/';
+      url.search = '';
+      return NextResponse.redirect(url);
+    }
+    const res = NextResponse.next();
+    res.headers.set('Cache-Control', 'no-store, must-revalidate');
+    return res;
   }
+
+  if (isPublic(pathname)) return NextResponse.next();
+  if (authed) return NextResponse.next();
 
   // API callers get a machine-readable 401 (the fetch wrapper turns this into a
   // thrown Error); page navigations get bounced to the login screen.
