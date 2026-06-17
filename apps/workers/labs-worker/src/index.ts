@@ -3,7 +3,7 @@ import path from 'node:path';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { Worker, type Job } from 'bullmq';
 import pino from 'pino';
-import { acquire, tryAcquireSlot, connection } from '@emberforge/queue';
+import { acquire, tryAcquireSlot, connection, allLaneQueues, NUM_LANES } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
 import { labs69, withKeySlot } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
@@ -249,8 +249,17 @@ async function processShot(job: Job) {
 // cross-process limit is the per-key slot pools inside withKeySlot. Jobs pulled
 // beyond free slots park in withKeySlot's wait loop holding only a BullMQ lock
 // (no download buffer until a slot opens), so peak RAM ~= IMAGE_MAX + VIDEO_MAX.
-new Worker('labsImage', processShot, { connection, concurrency: IMAGE_MAX });
-new Worker('labsVideo', processShot, { connection, concurrency: VIDEO_MAX });
+// One worker group per lane (LABS_LANES). Each lane drains its own
+// labsImage{N}/labsVideo{N} queues so a second project generates concurrently
+// instead of queueing behind the first. The handler is identical — it routes on
+// job.data.kind, not the queue name — and EVERY lane shares the same per-key
+// slot pools inside withKeySlot, so 69labs' concurrency caps still hold no
+// matter how many lanes run. Concurrency stays at the full pool size per lane,
+// so a single active project saturates every slot (100%) and two split them.
+for (const { image, video } of allLaneQueues()) {
+  new Worker(image, processShot, { connection, concurrency: IMAGE_MAX });
+  new Worker(video, processShot, { connection, concurrency: VIDEO_MAX });
+}
 
 // On shutdown (incl. the `--watch` dev restart), cancel any in-flight 69labs
 // jobs so they release their concurrency slots instead of orphaning and
@@ -273,6 +282,13 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 process.on('SIGINT', () => void shutdown('SIGINT'));
 
 log.info(
-  { perKeyMax: PER_KEY_MAX, maxKeys: MAX_KEYS, imagePull: IMAGE_MAX, videoPull: VIDEO_MAX },
-  'labs-worker started (labsImage + labsVideo) — per-key slot pools',
+  {
+    lanes: NUM_LANES,
+    queues: allLaneQueues().flatMap((l) => [l.image, l.video]),
+    perKeyMax: PER_KEY_MAX,
+    maxKeys: MAX_KEYS,
+    imagePull: IMAGE_MAX,
+    videoPull: VIDEO_MAX,
+  },
+  `labs-worker started — ${NUM_LANES} lane(s), per-key slot pools shared across lanes`,
 );

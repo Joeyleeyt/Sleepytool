@@ -1,18 +1,30 @@
 import { FlowProducer, QueueEvents, type JobsOptions } from 'bullmq';
-import { connection, jobOptionsFor, type QueueName } from '@emberforge/queue';
+import {
+  connection,
+  jobOptionsFor,
+  assignLane,
+  heartbeatLane,
+  releaseLane,
+  laneQueues,
+  isLabsImageQueue,
+  isLabsVideoQueue,
+  isTtsQueue,
+  isVeo3Queue,
+  type QueueName,
+} from '@emberforge/queue';
 import { eventsRepo, projectsRepo, shotsRepo } from '@emberforge/db';
 
 const flow = new FlowProducer({ connection });
 const DISABLE_VEO3 = (process.env.DISABLE_VEO3 ?? 'false') === 'true';
 
-// Which external provider each fan-out queue actually hits — so the logs answer
+// Which external provider a fan-out queue actually hits — so the logs answer
 // "did this asset go to 69labs or veo3?" without cross-referencing the workers.
-const QUEUE_PROVIDER: Record<string, string> = {
-  tts: '69labs',
-  labsImage: '69labs',
-  labsVideo: '69labs',
-  veo3: 'veo3',
-};
+// Handles every lane (labsImage2, labsVideo2, …), not just the base queues.
+function providerFor(queueName: string): string {
+  if (isVeo3Queue(queueName)) return 'veo3';
+  if (isTtsQueue(queueName) || isLabsImageQueue(queueName) || isLabsVideoQueue(queueName)) return '69labs';
+  return 'unknown';
+}
 
 /**
  * Fan out a job per shot per asset type and BLOCK until every leaf finishes.
@@ -28,6 +40,13 @@ export async function generateAssetsStage(projectId: string) {
   const shots = await shotsRepo.findByProject(projectId);
   if (shots.length === 0) throw new Error(`project ${projectId} has no shots to generate`);
 
+  // Assign this project to a 69labs lane (worker group) so its image/video jobs
+  // get their own queues and don't sit behind another project's backlog. The
+  // lane's workers share the same per-key slot pools, so 69labs caps still hold.
+  const lane = await assignLane(projectId);
+  const lq = laneQueues(lane);
+  console.log(`[generateAssets] project ${projectId} -> lane ${lane} (${lq.image} / ${lq.video})`);
+
   const children: { name: string; queueName: string; data: unknown; opts?: JobsOptions }[] = [];
 
   // Track what we fanned out, broken down by queue, so we can both log a
@@ -38,31 +57,31 @@ export async function generateAssetsStage(projectId: string) {
   const enqueue = (queueName: string, data: unknown, asset: string, shotId: string) => {
     children.push({ name: queueName, queueName, data, opts: jobOptionsFor(queueName as QueueName) });
     console.log(
-      `[generateAssets] enqueued ${asset.padEnd(11)} -> ${queueName.padEnd(10)} (${QUEUE_PROVIDER[queueName]})  shot=${shotId}`,
+      `[generateAssets] enqueued ${asset.padEnd(11)} -> ${queueName.padEnd(10)} (${providerFor(queueName)})  shot=${shotId}`,
     );
   };
 
   for (const shot of shots) {
     // TTS (narration audio) for every shot
-    enqueue('tts', { projectId, shotId: shot.id }, 'narration', shot.id);
+    enqueue(lq.tts, { projectId, shotId: shot.id }, 'narration', shot.id);
 
     // Visual job — routed by visualType
     switch (shot.visualType) {
       case 'cinematic_video':
         if (DISABLE_VEO3) {
-          enqueue('labsVideo', { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
+          enqueue(lq.video, { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
         } else {
-          enqueue('veo3', { projectId, shotId: shot.id }, 'video_clip', shot.id);
+          enqueue(lq.veo3, { projectId, shotId: shot.id }, 'video_clip', shot.id);
         }
         break;
       case 'image_with_motion':
-        enqueue('labsImage', { projectId, shotId: shot.id, kind: 'image' }, 'image', shot.id);
+        enqueue(lq.image, { projectId, shotId: shot.id, kind: 'image' }, 'image', shot.id);
         break;
       case 'atmospheric_broll':
       case 'infographic':
       case 'animated_diagram':
       case 'motion_typography':
-        enqueue('labsVideo', { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
+        enqueue(lq.video, { projectId, shotId: shot.id, kind: 'video' }, 'video_clip', shot.id);
         break;
     }
   }
@@ -74,7 +93,7 @@ export async function generateAssetsStage(projectId: string) {
   }, {});
   console.log(`[generateAssets] fan-out for project ${projectId}: ${shots.length} shots -> ${children.length} jobs`);
   console.table(
-    Object.entries(byQueue).map(([queue, count]) => ({ queue, provider: QUEUE_PROVIDER[queue], count })),
+    Object.entries(byQueue).map(([queue, count]) => ({ queue, provider: providerFor(queue), count })),
   );
 
   // Submit the assetsReady parent with all children. BullMQ keeps the parent
@@ -89,11 +108,19 @@ export async function generateAssetsStage(projectId: string) {
   await projectsRepo.setStatus(projectId, 'generating_assets');
   await eventsRepo.emit(projectId, 'generateAssets', 'fanned_out', { jobs: children.length, byQueue });
 
-  // Block until the parent (and therefore every child) is done.
+  // Block until the parent (and therefore every child) is done. Heartbeat the
+  // lane assignment so a crash mid-generation frees the lane (its slot in the
+  // least-loaded picker) instead of pinning it; release it when the phase ends.
   const events = new QueueEvents('orchestrator', { connection });
+  const laneHeartbeat = setInterval(
+    () => void heartbeatLane(projectId, lane).catch(() => {}),
+    20_000,
+  );
   try {
     await tree.job.waitUntilFinished(events);
   } finally {
+    clearInterval(laneHeartbeat);
+    await releaseLane(projectId, lane).catch(() => {});
     await events.close();
   }
 

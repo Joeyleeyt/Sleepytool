@@ -1,18 +1,26 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
-import { Worker } from 'bullmq';
+import { Worker, type Job } from 'bullmq';
 import pino from 'pino';
-import { acquire, connection } from '@emberforge/queue';
+import { acquire, acquireSlot, connection, allLaneQueues, NUM_LANES, type Slot } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
 import { generateVideo } from '@emberforge/ai-clients';
 import { r2Paths, uploadFile } from '@emberforge/storage';
 
 const log = pino({ name: 'veo3-worker' });
 
-new Worker(
-  'veo3',
-  async (job) => {
+// Global veo3 concurrency cap, shared across ALL lanes via one Redis slot pool
+// (cc:veo3). veo3 has no per-key pool like 69labs, so without this a second lane
+// would double the in-flight video downloads (peak memory on the shared workers
+// box) and the concurrent veo3 submissions. Work-conserving: one active project
+// fills all VEO3_MAX slots (100%), two split them. Default matches the old
+// single-group concurrency of 4.
+const VEO3_MAX = Math.max(1, Number(process.env.VEO3_MAX_CONCURRENCY ?? 4));
+
+// One shot's veo3 video. Shared by every lane's veo3{N} worker — routes on
+// job.data, not the queue name, so it's identical across lanes.
+async function processVeo3(job: Job) {
     const { projectId, shotId } = job.data as { projectId: string; shotId: string };
     const shot = await shotsRepo.findById(shotId);
     if (!shot) throw new Error(`shot ${shotId} not found`);
@@ -33,8 +41,13 @@ new Worker(
       status: 'queued',
     });
 
+    let slot: Slot | undefined;
     try {
       await acquire('veo3');
+      // Hold a global veo3 slot for the whole job (generate + download) so total
+      // in-flight stays capped at VEO3_MAX across every lane — the in-memory
+      // download buffer is the constraint. Released in finally.
+      slot = await acquireSlot('veo3', VEO3_MAX);
       await generationsRepo.markStarted(generation.id);
       const t0 = Date.now();
 
@@ -77,14 +90,22 @@ new Worker(
       await generationsRepo.markFailed(generation.id, { message: (err as Error).message });
       log.error({ shotId, err }, 'veo3 failed');
       throw err;
+    } finally {
+      await slot?.release();
     }
-  },
-  // Each job buffers a whole video download in memory, so concurrency caps the
-  // peak memory on the shared 2gb `workers` machine — NOT throughput (the veo3
-  // rate limiter at ~30/min is the real throughput gate, and phases run
-  // sequentially so this fan-out is the only veo3 load at a time). 4 keeps peak
-  // download buffers well under the memory budget alongside labs/tts/heap.
-  { connection, concurrency: 4 },
-);
+}
 
-log.info('veo3-worker started');
+// One worker group per lane (LABS_LANES). Each lane drains its own veo3{N} queue
+// so a second project's clips generate concurrently instead of queueing behind
+// the first. Each job buffers a whole video download in memory, so the shared
+// cc:veo3 slot pool (VEO3_MAX) — not BullMQ concurrency — is what caps peak
+// memory across all lanes. BullMQ concurrency is just the pull cap, left at
+// VEO3_MAX so a single lane can fill every slot.
+for (const { veo3 } of allLaneQueues()) {
+  new Worker(veo3, processVeo3, { connection, concurrency: VEO3_MAX });
+}
+
+log.info(
+  { lanes: NUM_LANES, queues: allLaneQueues().map((l) => l.veo3), max: VEO3_MAX },
+  `veo3-worker started — ${NUM_LANES} lane(s), shared cc:veo3 slot pool`,
+);
