@@ -56,6 +56,27 @@ export default function TimelinePage() {
 
   const totalDur = clips.length ? clips[clips.length - 1]!.startS + clips[clips.length - 1]!.durationS : 0;
 
+  // Total video duration is only shown once the render is COMPLETE. Before that
+  // every figure (150-wpm estimate, then per-scene/-shot TTS) drifts from the
+  // final cut, so we surface nothing rather than a misleading number — and when
+  // we do show it, it's the authoritative render length, not the estimate.
+  const { data: project } = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => api.getProject(projectId),
+    refetchInterval: (q) => (q.state.data?.status === 'published' ? false : 5000),
+  });
+  const renderCapable = !!project && RENDER_CAPABLE.has(project.status);
+  const { data: render } = useQuery({
+    queryKey: ['render-url', projectId],
+    queryFn: () => api.getRenderUrl(projectId),
+    enabled: renderCapable,
+    retry: false,
+    staleTime: 50 * 60_000,
+    refetchInterval: (q) => (q.state.data?.url ? false : 8000),
+  });
+  const finalDur =
+    project?.status === 'published' && render?.durationS != null ? Number(render.durationS) : null;
+
   const selectedClip = clips.find((c) => c.id === selectedShot) ?? null;
 
   return (
@@ -67,14 +88,16 @@ export default function TimelinePage() {
           <div className="p-4 space-y-3 text-sm text-text-dim">
             <h3 className="text-xs uppercase tracking-wider text-text-faint">Timeline</h3>
             <p>Click any clip to inspect.</p>
-            <div className="text-text">Total runtime: <span className="font-mono">{formatDuration(totalDur)}</span></div>
+            {finalDur != null && (
+              <div className="text-text">Total runtime: <span className="font-mono">{formatDuration(finalDur)}</span></div>
+            )}
             <div>Clips: <span className="font-mono">{clips.length}</span></div>
           </div>
         )
       }
     >
       <div className="h-full flex flex-col">
-        <PreviewMonitor projectId={projectId} totalDur={totalDur} />
+        <PreviewMonitor projectId={projectId} />
 
         <div className="border-t border-border p-2 flex items-center gap-3 bg-bg-subtle">
           <span className="text-xs text-text-faint">Zoom</span>
@@ -89,7 +112,9 @@ export default function TimelinePage() {
               {p === 2 ? 'Project' : p === 8 ? 'Scene' : 'Frame'}
             </button>
           ))}
-          <div className="ml-auto text-xs text-text-faint font-mono">{formatDuration(totalDur)}</div>
+          {finalDur != null && (
+            <div className="ml-auto text-xs text-text-faint font-mono">{formatDuration(finalDur)}</div>
+          )}
         </div>
 
         <div className="flex-1 overflow-auto bg-bg-subtle">
@@ -102,7 +127,7 @@ export default function TimelinePage() {
   );
 }
 
-function PreviewMonitor({ projectId, totalDur }: { projectId: string; totalDur: number }) {
+function PreviewMonitor({ projectId }: { projectId: string }) {
   // Gate render-url polling on project status: only once the project reaches the
   // render phase can a render exist. This stops early-stage timelines from
   // polling a 404 every 8s. Keep polling status until it's published (terminal).
@@ -144,8 +169,7 @@ function PreviewMonitor({ projectId, totalDur }: { projectId: string; totalDur: 
     <div className={`${wrap} grid place-items-center text-text-faint`}>
       <div className="text-center">
         <Play size={42} className="mx-auto opacity-50" />
-        <div className="mt-2 text-xs font-mono">00:00 / {formatDuration(totalDur)}</div>
-        <div className="mt-1 text-[11px] text-text-faint">Preview will appear after render</div>
+        <div className="mt-2 text-[11px] text-text-faint">Preview will appear after render</div>
       </div>
     </div>
   );

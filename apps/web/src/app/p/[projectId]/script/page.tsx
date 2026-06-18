@@ -5,7 +5,7 @@ import { ThreePane } from '@/components/layout/ThreePane';
 import { Badge } from '@/components/primitives/Badge';
 import { PhaseBanner } from '@/components/layout/PhaseBanner';
 import { api } from '@/lib/api';
-import { STAGE_LABELS, formatDuration } from '@/lib/utils';
+import { STAGE_LABELS } from '@/lib/utils';
 
 export default function ScriptPage() {
   const { projectId } = useParams() as { projectId: string };
@@ -17,7 +17,6 @@ export default function ScriptPage() {
   });
   const scenes = scenesData?.scenes ?? [];
   const totalShots = scenes.reduce((n, s) => n + s.shots.length, 0);
-  const totalDur = scenes.reduce((sum, s) => sum + Number(s.estimatedDurS ?? 0), 0);
 
   return (
     <ThreePane
@@ -27,7 +26,6 @@ export default function ScriptPage() {
           <div className="grid grid-cols-2 gap-2 text-sm">
             <Stat label="Scenes" value={scenes.length} />
             <Stat label="Shots" value={totalShots} />
-            <Stat label="Runtime" value={formatDuration(totalDur)} />
           </div>
           <div className="space-y-2">
             <h3 className="text-xs uppercase tracking-wider text-text-faint">Style</h3>
