@@ -12,6 +12,7 @@ import { buildTimelineStage } from './stages/buildTimeline.js';
 import { mixAudioStage } from './stages/mixAudio.js';
 import { publishStage } from './stages/publish.js';
 import { eventsRepo, projectsRepo } from '@emberforge/db';
+import { startRenderAutoscaler } from './renderAutoscaler.js';
 
 const log = pino({ name: 'orchestrator' });
 
@@ -117,3 +118,9 @@ for (const w of workers) {
 }
 
 log.info({ queues: workers.map((w) => w.name) }, 'orchestrator started');
+
+// Hands-free render scaling: starts/stops a 2nd render machine off render queue
+// depth so two long videos render at once, then scales back to one when idle.
+// No-op unless RENDER_AUTOSCALE_ENABLED=true. Leader-locked so only one of the
+// (possibly several) workers instances drives the Fly Machines API.
+startRenderAutoscaler(log);
