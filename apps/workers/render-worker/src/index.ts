@@ -659,3 +659,36 @@ worker.on('ready', () => {
 });
 
 log.info({ workDir: WORK_DIR, nvenc: NVENC }, 'render-worker started');
+
+// Graceful shutdown. The render autoscaler stops the SECONDARY render machine
+// when the queue drains (Fly /stop → SIGINT, then SIGTERM), and a deploy
+// (strategy=immediate) can replace any render machine. Without a handler the
+// process is hard-killed (exit 143): an active job's BullMQ lock then lingers
+// until RENDER_LOCK_MS (10 min) expires before the job can be retried, and —
+// the real hazard — there's a race where a job enqueued between the autoscaler's
+// queue-depth read and its /stop lands on a worker that's about to die.
+//
+// worker.close() fixes both: it stops pulling NEW jobs the instant the signal
+// arrives (closing that race) and releases locks cleanly. In the normal
+// autoscaler-stop case the machine is idle (the scaler only stops at demand 0),
+// so close() returns near-instantly. If a multi-hour render IS active (e.g. a
+// mid-render deploy) we don't block exit on it — Fly will SIGKILL after its grace
+// window regardless — so we bound the graceful wait and let the resume-safe
+// composite/audio checkpoints recover the job on its retry.
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.warn({ signal }, '[render] signal received — closing worker (no new jobs will be picked up)');
+  try {
+    await Promise.race([
+      worker.close(),
+      new Promise((resolve) => setTimeout(resolve, 10_000)),
+    ]);
+  } catch (err) {
+    log.error({ err: (err as Error).message }, '[render] worker close failed during shutdown');
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
