@@ -1,7 +1,8 @@
 'use client';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Library, ListChecks, Palette, KeyRound, Settings, HelpCircle, CircleUser, Flame, LogOut } from 'lucide-react';
+// Library, Palette, Settings, HelpCircle kept out until their nav items are restored.
+import { Home, ListChecks, KeyRound, CircleUser, Flame, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Item {
@@ -14,14 +15,16 @@ interface Item {
 
 const TOP: Item[] = [
   { href: '/', icon: Home, label: 'Projects' },
-  { href: '/library', icon: Library, label: 'Library' },
+  // Hidden until ready — restore when the feature ships:
+  // { href: '/library', icon: Library, label: 'Library' },
   { href: '/queue', icon: ListChecks, label: 'Render Queue' },
-  { href: '/style-presets', icon: Palette, label: 'Presets' },
+  // { href: '/style-presets', icon: Palette, label: 'Presets' },
   { href: '/keys', icon: KeyRound, label: 'API Keys' },
 ];
 const BOTTOM: Item[] = [
-  { href: '/settings', icon: Settings, label: 'Settings' },
-  { href: '/help', icon: HelpCircle, label: 'Help' },
+  // Hidden until ready — restore when the feature ships:
+  // { href: '/settings', icon: Settings, label: 'Settings' },
+  // { href: '/help', icon: HelpCircle, label: 'Help' },
   { href: '/account', icon: CircleUser, label: 'Account' },
 ];
 
