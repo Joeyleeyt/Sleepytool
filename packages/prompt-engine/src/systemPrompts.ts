@@ -23,6 +23,13 @@ Analyze the complete narration transcript and output a single JSON object with E
   "toneSummary": string,              // ONE soft mood fragment, injected into every prompt as "overall mood ...".
                                       // Keep it calming and dark, e.g. "hushed, weightless, dreamlike, slow and dark".
   "estimatedDurationS": number,       // assume 150 words/minute; return seconds (positive)
+  "genre": "space" | "history" | "philosophy" | "nature" | "science" | "other",
+                                      // The documentary niche. Choose "history" for any film about historical
+                                      // people, civilizations or events (ancient Rome, medieval Europe, explorers,
+                                      // philosophers, rulers, scientists, artists, religious or military figures).
+                                      // This unlocks figure-accurate shot rules downstream, so named historical
+                                      // people stay on screen as era archetypes instead of being recast to scenery.
+                                      // Use "other" only when none of the niches fit.
 
   // --- Visual-world contract: this is what locks the niche so the screen never
   //     drifts into random symbolic objects. Be strict and concrete. ---
@@ -37,6 +44,16 @@ Analyze the complete narration transcript and output a single JSON object with E
                                       //   spiral galaxy","a drifting starfield","a lone comet","a cratered moon
                                       //   surface","an asteroid field","faint cosmic dust","a ringed planet","a
                                       //   distant dying sun","a dark planet's night side","silent orbital debris"].
+                                      // HISTORY genre: people ARE on-screen subjects, so at least HALF of this list
+                                      //   MUST be HUMAN ARCHETYPES (described by era/role/clothing, never a real name
+                                      //   or famous face), the rest period environments. The film must NOT be all
+                                      //   empty rooms — figures are the backbone of a history doc. e.g. ancient_rome
+                                      //   -> ["robed senators mid-debate in a marble hall","an elderly philosopher
+                                      //   teaching seated students","a general in armor before his legion","a queen
+                                      //   receiving envoys in a gilded court","a scribe bent over a scroll by
+                                      //   candlelight","a crowd gathered in a dim forum","a lone statesman on stone
+                                      //   steps","torchlit colonnades at night","a still marble temple interior","a
+                                      //   quiet river past the sleeping city"].
   "forbiddenVisualDomains": string[], // concrete things that must NEVER appear (injected into the negative prompt).
                                       // Include obvious off-world intrusions, e.g. ["coffee cup","office","modern room",
                                       // "chair","people in modern clothing","symbolic objects","charts","text overlays"].
@@ -72,7 +89,7 @@ Output a single JSON object with EXACTLY this shape (no wrapper, no extra fields
 
 export const CLASSIFY_SYSTEM = `You are the shot designer for a SLEEP DOCUMENTARY. The viewer is trying to fall asleep, so every shot must be calm, dark and low-stimulation. The film must NOT loop near-identical footage for hours — repetitive shots get the channel demonetized — but variety comes naturally here because every shot is built from a DIFFERENT sentence of the narration.
 
-You are given an optional "world" hint (the film's overall subject, and things to avoid), a scene (with analysis.atmosphere / analysis.topic / analysis.visualOpportunities) and an ORDERED list of shots whose narrationText has ALREADY been split. Do NOT split, merge, reorder, rewrite, or re-time them — treat each shot's narrationText as fixed.
+You are given an optional "world" hint (the film's overall subject, its genre, and things to avoid), a scene (with analysis.atmosphere / analysis.topic / analysis.visualOpportunities) and an ORDERED list of shots whose narrationText has ALREADY been split. Do NOT split, merge, reorder, rewrite, or re-time them — treat each shot's narrationText as fixed.
 
 THE ONE HARD RULE — EVERY SHOT MUST BELONG TO THE MAIN SUBJECT (world.visualWorld / the film's overall scenario).
 The prompt system must NEVER produce a visual that is unrelated to the main subject. Within that subject you have
@@ -95,6 +112,27 @@ holes, cosmic dust, deep space — never a person, room, document or everyday ob
    Metaphors and abstract filler ("today", "imagine", "subscribe") are off-subject in EVERY film -> re-cast or drop.
    If a word cannot be expressed inside the main subject, drop it and show a calm on-subject view. NOTHING
    off-subject ever reaches the screen.
+
+   HISTORICAL FIGURES — HARD RULE (applies ONLY when world.genre is "history"). If a shot's narrationText NAMES or
+   centers on a person — a philosopher, ruler, explorer, scientist, artist, military or religious leader, a crowd,
+   senators, students, envoys, soldiers — that PERSON is the subject. You MUST keep them on screen. It is a FAILURE
+   to answer an empty room, hall, grove, palace, ruins, river or landscape when the sentence is about a person.
+   Convert the named person into a descriptive historical ARCHETYPE — era + role + clothing + activity — WITHOUT a
+   real-person or celebrity likeness (describe the TYPE of person, never the specific famous face):
+     "Plato taught his students in Athens" -> an elderly Greek philosopher teaching seated students beneath marble colonnades.
+     "Julius Caesar entered the senate" -> a Roman statesman in ceremonial robes entering a grand marble senate hall of robed senators.
+     "Cleopatra received envoys" -> an Egyptian queen on her throne receiving robed envoys in a gilded palace court.
+     "Leonardo da Vinci sketched inventions" -> a Renaissance inventor bent over notebooks of mechanical sketches.
+   For such a shot ALL of the following MUST hold together (no contradictions):
+     - subject = the HUMAN ARCHETYPE noun phrase (e.g. "a robed Roman statesman"), NOT the room/place around them.
+     - visualSummary MUST literally describe that person/people performing the activity; a place may be the BACKDROP
+       but a human figure must be visibly present. A summary with no person in it is WRONG when showsPeople is true.
+     - showsPeople = true, and visualType = image_with_motion (or cinematic_video) — NEVER atmospheric_broll, which
+       renders "no people" and would delete the figure.
+   Prefer the HUMAN ARCHETYPES that world.allowedVisualDomains already lists. Only choose a people-free environment
+   shot (showsPeople=false) when the sentence genuinely has no person — pure geography, architecture, an object, or a
+   location — or the person is incidental, not the focus. Before finalizing each shot, self-check: "does the
+   narrationText name a person? if yes, is a human figure actually in my subject AND visualSummary?"
 3. NEVER show world.forbiddenVisualDomains, nor on-screen text, captions, UI, charts, diagrams or modern clutter.
 4. NO TWO IDENTICAL SHOTS IN A ROW. Consecutive shots differ naturally because each follows its own sentence — just
    never collapse two neighbours to the exact same view. What stays CONSTANT shot-to-shot is the tone, palette,

@@ -98,6 +98,10 @@ type WorldContract = {
   worldName: string | null;
   allowed: string[];
   forbidden: string[];
+  // The documentary niche (from the analyze stage). Handed to the LLM so it can
+  // apply genre-specific shot rules — e.g. "history" keeps named historical
+  // people on screen as era archetypes instead of recasting them to scenery.
+  genre: string | null;
 };
 
 function containsAny(haystack: string, needles: string[]): boolean {
@@ -136,13 +140,25 @@ function enforceWorld(
 // location/mood (the new contract); fall back to the model's free-text
 // visualSummary, then to a summary of the narration. This is how each shot's own
 // sentence — its own transcript keywords — reaches generation.
+// A locative phrase in the subject signals it ALREADY names where it sits
+// (e.g. "a regal figure in a softly lit palace"), so appending the separate
+// location field would just repeat the place ("…palace, within the gilded walls
+// of her palace"). When the subject already has a place, the location fragment
+// is dropped; activity is always kept. We require the preposition to be followed
+// by a determiner ("in a palace", "on her throne") so non-locative idioms like
+// "in deep thought", "at rest" or "before dawn" don't trip it and discard a
+// genuine location.
+const SUBJECT_HAS_PLACE = /\b(in|within|inside|atop|on|at|beneath|under|among|amid|beside|near)\s+(a|an|the|his|her|their|its|this|that)\b/i;
+
 function composeSummary(v: ShotVisual, fallbackNarration: string): string {
   const subject = (v.subject ?? '').trim();
   if (subject) {
+    const location = (v.location ?? '').trim();
+    const includeLocation = location && !SUBJECT_HAS_PLACE.test(subject);
     const parts = [
       subject,
       (v.activity ?? '').trim(),
-      (v.location ?? '').trim(),
+      includeLocation ? location : '',
     ].filter(Boolean);
     const base = parts.join(', ');
     const mood = (v.mood ?? '').trim();
@@ -170,11 +186,13 @@ export async function classifyStage(projectId: string) {
     visualWorld?: string | null;
     allowedVisualDomains?: string[] | null;
     forbiddenVisualDomains?: string[] | null;
+    genre?: string | null;
   };
   const world: WorldContract = {
     worldName: tAnalysis.visualWorld ? tAnalysis.visualWorld.replace(/_/g, ' ') : null,
     allowed: (tAnalysis.allowedVisualDomains ?? []).filter(Boolean),
     forbidden: (tAnalysis.forbiddenVisualDomains ?? []).filter(Boolean),
+    genre: tAnalysis.genre ?? null,
   };
 
   // eslint-disable-next-line no-console
@@ -221,6 +239,7 @@ export async function classifyStage(projectId: string) {
             // list. forbiddenVisualDomains remains a hard ban.
             world: {
               visualWorld: world.worldName,
+              genre: world.genre,
               allowedVisualDomains: world.allowed,
               forbiddenVisualDomains: world.forbidden,
             },

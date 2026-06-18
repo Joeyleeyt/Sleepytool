@@ -97,7 +97,7 @@ primary_region = 'lhr'
   # shared-cpu-4x (max 8gb) — shared-cpu-2x would be rejected at 4gb max. The
   # extra vCPUs are incidental (the work is I/O-bound); we're buying the RAM.
   size = 'shared-cpu-4x'
-  memory = '6gb'
+  memory = '8gb'   # was '6gb'  (shared-cpu-4x supports up to 8gb)
   processes = ['workers']
 
 [[vm]]

@@ -84,4 +84,9 @@ export const TranscriptAnalysisSchema = z.object({
   palette: z.string().nullable().optional(),                // e.g. "dark, low-saturation indigo and black"
   movementStyle: z.string().nullable().optional(),          // e.g. "slow drift and gentle push-in only"
   stimulationLevel: z.enum(['minimal', 'low', 'medium']).nullable().optional(),
+  // The documentary niche. Drives genre-specific shot rules in the classify
+  // stage (e.g. "history" unlocks figure-accurate handling so named historical
+  // people stay on screen as descriptive era archetypes instead of being recast
+  // to scenery). nullable+optional for legacy/labs-only projects that predate it.
+  genre: z.enum(['space', 'history', 'philosophy', 'nature', 'science', 'other']).nullable().optional(),
 });
