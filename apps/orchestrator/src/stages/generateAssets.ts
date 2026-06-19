@@ -98,9 +98,18 @@ export async function generateAssetsStage(projectId: string) {
 
   // Submit the assetsReady parent with all children. BullMQ keeps the parent
   // in 'waiting-children' until every leaf finishes.
+  //
+  // The parent lives on the dedicated 'assetsGate' queue — NOT 'orchestrator'.
+  // This generateAssets job is itself an 'orchestrator' job that blocks below on
+  // waitUntilFinished for the parent's completion. If the parent also sat on
+  // 'orchestrator', it would need a free slot in the very pool this (and every
+  // other concurrent) generateAssets job is occupying — so once concurrency was
+  // saturated by blocked generateAssets jobs, none of their assetsReady parents
+  // could ever run and the whole queue deadlocked. A separate gate queue with
+  // its own worker breaks that cycle.
   const tree = await flow.add({
     name: 'assetsReady',
-    queueName: 'orchestrator',
+    queueName: 'assetsGate',
     data: { projectId, stage: 'assetsReady' },
     children,
   });
@@ -111,7 +120,7 @@ export async function generateAssetsStage(projectId: string) {
   // Block until the parent (and therefore every child) is done. Heartbeat the
   // lane assignment so a crash mid-generation frees the lane (its slot in the
   // least-loaded picker) instead of pinning it; release it when the phase ends.
-  const events = new QueueEvents('orchestrator', { connection });
+  const events = new QueueEvents('assetsGate', { connection });
   const laneHeartbeat = setInterval(
     () => void heartbeatLane(projectId, lane).catch(() => {}),
     20_000,

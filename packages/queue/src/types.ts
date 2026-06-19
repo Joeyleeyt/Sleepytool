@@ -22,7 +22,14 @@ export type QueueName =
   | 'audio'
   | 'render'
   | 'publish'
-  | 'orchestrator';
+  | 'orchestrator'
+  // The `assetsReady` completion gate. It lives on its OWN queue (not
+  // 'orchestrator') so it is processed by a dedicated worker and can never be
+  // starved by the blocking `generateAssets` jobs that occupy the orchestrator
+  // pool while awaiting it — that self-starvation is what deadlocked the
+  // orchestrator queue (3 blocked generateAssets jobs → 0 slots left for their
+  // own assetsReady parents → wait forever). See generateAssets.ts.
+  | 'assetsGate';
 
 export interface StageJob {
   projectId: string;

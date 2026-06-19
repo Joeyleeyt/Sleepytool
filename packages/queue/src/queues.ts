@@ -33,6 +33,9 @@ const OPTS: Record<QueueName, JobsOptions | undefined> = {
   render:       backoff(3),
   publish:      undefined,
   orchestrator: undefined,
+  // No retry/backoff: the gate body is a no-op that only flips to completed once
+  // all its flow children finish. Its options come from the FlowProducer parent.
+  assetsGate:   undefined,
 };
 
 /**

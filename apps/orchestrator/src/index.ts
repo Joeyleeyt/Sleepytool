@@ -86,16 +86,31 @@ const workers = [
     'orchestrator',
     async (job) => {
       // 'assetsReady' is a parent-with-children placeholder; its body is empty
-      // — it only succeeds when all its child generation jobs succeed.
+      // — it only succeeds when all its child generation jobs succeed. New
+      // flows route the parent to the dedicated 'assetsGate' queue (below);
+      // this branch stays only for in-flight parents enqueued before that
+      // change, so they still complete after a deploy.
       if (job.data.stage === 'assetsReady') return { ok: true };
       if (job.data.stage === 'generateAssets') return generateAssetsStage(job.data.projectId);
       return null;
     },
-    // Concurrency must be ≥ max concurrent projects, because generateAssets
-    // blocks for the full duration of asset generation. Sized for low-volume
-    // sequential operation — 3 concurrent projects in the asset-gen phase.
-    workerOpts({ concurrency: 3 }),
+    // Each generateAssets job BLOCKS (awaits waitUntilFinished) for the full
+    // duration of its project's asset generation, holding a slot the whole time.
+    // That wait is pure I/O idle — no CPU — so a high concurrency is cheap and
+    // just bounds how many projects can be in the asset phase at once. The old
+    // value of 3 meant a few stuck projects pinned every slot and no further
+    // generateAssets job could start (the "Generate assets button does nothing"
+    // symptom). Override with ORCH_CONCURRENCY if needed.
+    workerOpts({ concurrency: Math.max(3, Number(process.env.ORCH_CONCURRENCY ?? 25)) }),
   ),
+
+  // Dedicated worker for the asset-generation completion gate. Kept OFF the
+  // 'orchestrator' pool on purpose: the gate must be free to run the instant a
+  // project's children finish, even while every orchestrator slot is occupied by
+  // blocked generateAssets jobs. The body is a no-op — BullMQ only marks the job
+  // completed once all its flow children have, which is the signal generateAssets
+  // is awaiting. High concurrency because each run is instant.
+  new Worker('assetsGate', async () => ({ ok: true }), workerOpts({ concurrency: 50 })),
 
   new Worker('timeline', async (job) => buildTimelineStage(job.data.projectId), workerOpts({ concurrency: 1 })),
 

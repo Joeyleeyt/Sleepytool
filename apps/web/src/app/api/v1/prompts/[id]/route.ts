@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { eventsRepo, promptsRepo } from '@emberforge/db';
+import { eventsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
 import { parseJsonBody } from '@/lib/httpBody';
 
 export const runtime = 'nodejs';
@@ -22,10 +22,18 @@ export async function PATCH(request: Request, { params }: { params: { id: string
   if (!existing) return NextResponse.json({ error: 'prompt not found' }, { status: 404 });
   const row = await promptsRepo.update(params.id, body);
   if (row) {
-    await eventsRepo.emit(existing.shotId, 'prompt', 'edited', {
-      promptId: params.id,
-      target: existing.target,
-    });
+    // project_events.project_id is FK'd to projects.id, so the event must carry
+    // the PROJECT id — not the prompt's shotId (which would violate the FK and
+    // 500 the whole PATCH, silently aborting the "Save & send" regenerate flow
+    // before it ever re-enqueues the shot). Resolve it via the shot.
+    const shot = await shotsRepo.findById(existing.shotId);
+    if (shot) {
+      await eventsRepo.emit(shot.projectId, 'prompt', 'edited', {
+        promptId: params.id,
+        shotId: existing.shotId,
+        target: existing.target,
+      });
+    }
   }
   return NextResponse.json(row);
 }
