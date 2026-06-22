@@ -25,6 +25,9 @@ import {
   ffprobeDuration,
   isImageInput,
   buildSleepMaster,
+  cleanupProject,
+  cleanupProjectIntermediates,
+  humanBytes,
   type KenBurnsMode,
   type MixSegment,
   type SleepClip,
@@ -34,6 +37,45 @@ const log = pino({ name: 'render-worker' });
 
 const WORK_DIR = process.env.RENDER_WORK_DIR ?? path.join(os.tmpdir(), 'emberforge');
 const NVENC = (process.env.NVENC_ENABLED ?? 'true') === 'true';
+
+// Disk hygiene. The render scratch tree (downloaded sources + per-clip/batch
+// intermediates + master + mix + final) lives under WORK_DIR/<projectId>/ and was
+// never reclaimed, so the volume filled up over time → "ENOSPC: no space left on
+// device" mid-composite. We now (1) drop the regenerable per-clip/batch
+// intermediates as soon as the master is written (lowers PEAK during one render)
+// and (2) remove the whole project tree once the final render is safely uploaded
+// to R2 (everything there is re-downloadable / re-derivable). Set
+// RENDER_KEEP_SCRATCH=true to keep everything (debugging / manual inspection).
+// Cleanup is best-effort and MUST NEVER fail a render — failures are logged and
+// swallowed. The reusable logic lives in @emberforge/render (`cleanup.ts`); the
+// same functions back the `clean-scratch` CLI.
+const KEEP_SCRATCH = (process.env.RENDER_KEEP_SCRATCH ?? 'false') === 'true';
+
+/** Drop a project's regenerable intermediates (keeps master/mix/final). */
+async function cleanIntermediates(projectId: string): Promise<void> {
+  if (KEEP_SCRATCH) return;
+  try {
+    const r = await cleanupProjectIntermediates(WORK_DIR, projectId);
+    if (r.removed.length) {
+      log.info({ projectId, freed: humanBytes(r.freedBytes), paths: r.removed.length }, '[cleanup] intermediates removed');
+    }
+  } catch (err) {
+    log.warn({ projectId, err: (err as Error).message }, '[cleanup] intermediates cleanup failed (non-fatal)');
+  }
+}
+
+/** Remove a delivered project's whole scratch tree (after the R2 upload). */
+async function cleanProjectTree(projectId: string): Promise<void> {
+  if (KEEP_SCRATCH) return;
+  try {
+    const r = await cleanupProject(WORK_DIR, projectId);
+    if (r.removed.length) {
+      log.info({ projectId, freed: humanBytes(r.freedBytes), paths: r.removed.length }, '[cleanup] project tree removed');
+    }
+  } catch (err) {
+    log.warn({ projectId, err: (err as Error).message }, '[cleanup] project cleanup failed (non-fatal)');
+  }
+}
 
 // --- Sleep-story renderer ----------------------------------------------------
 // Transforms the composite into a slow, hypnotic sequence where every clip
@@ -322,6 +364,10 @@ async function runComposite(projectId: string) {
         height: h,
         fps: project.targetFps,
       });
+      // Master is on disk now — the hundreds of per-clip/batch intermediates are
+      // pure scratch and can go immediately, freeing ~10-20GB BEFORE the audio +
+      // final-encode stages need room (this is what prevents the in-job ENOSPC).
+      await cleanIntermediates(projectId);
       await projectsRepo.setStatus(projectId, 'composited');
       await eventsRepo.emit(projectId, 'composite', 'render_succeeded', {
         masterPath,
@@ -400,6 +446,8 @@ async function runComposite(projectId: string) {
     });
     log.info({ projectId, tookMs: Date.now() - mixStart }, '[composite] mix done');
 
+    // Master built — drop the freeze-frame / segment scratch before the next stage.
+    await cleanIntermediates(projectId);
     await projectsRepo.setStatus(projectId, 'composited');
     await eventsRepo.emit(projectId, 'composite', 'render_succeeded', {
       masterPath,
@@ -579,6 +627,11 @@ async function runFinalEncode(
       bytes: uploaded.bytes,
       totalMs: Date.now() - t0,
     });
+    // The deliverable is in R2 and recorded in the DB — the entire scratch tree
+    // (downloaded sources + master + mix + final + checkpoints) is now redundant,
+    // so reclaim it. Done last, after the render row is committed, so a failure
+    // before this point still leaves the resume checkpoints intact.
+    await cleanProjectTree(projectId);
     log.info({ projectId, totalMs: Date.now() - t0 }, '[encode] done');
     return render!;
   } catch (err) {

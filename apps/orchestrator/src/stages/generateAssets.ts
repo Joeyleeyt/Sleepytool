@@ -55,7 +55,23 @@ export async function generateAssetsStage(projectId: string) {
   // inherit a queue's defaultJobOptions, so without this each asset job would
   // run with attempts:1 and a single 69labs/veo3 FAILED would never be retried.
   const enqueue = (queueName: string, data: unknown, asset: string, shotId: string) => {
-    children.push({ name: queueName, queueName, data, opts: jobOptionsFor(queueName as QueueName) });
+    children.push({
+      name: queueName,
+      queueName,
+      data,
+      // ignoreDependencyOnFailure: a single shot that exhausts its retries (e.g. a
+      // 69labs content-moderation rejection) must NOT leave the assetsReady parent
+      // stuck in 'waiting-children' forever. Without it, BullMQ never completes the
+      // parent while any child stays failed, so generateAssets blocks indefinitely:
+      // the project hangs in 'generating_assets' and the blocking job pins a worker
+      // slot. With it, the parent completes once every child has SETTLED (succeeded
+      // OR permanently failed); the project advances to 'assets_ready' and the
+      // operator clears the stragglers with the per-shot Retry. (That retry enqueues
+      // a standalone job, not a child of this tree, so it can't satisfy the
+      // dependency either way — making "proceed on failure" the only non-stuck
+      // option.)
+      opts: { ...jobOptionsFor(queueName as QueueName), ignoreDependencyOnFailure: true },
+    });
     console.log(
       `[generateAssets] enqueued ${asset.padEnd(11)} -> ${queueName.padEnd(10)} (${providerFor(queueName)})  shot=${shotId}`,
     );

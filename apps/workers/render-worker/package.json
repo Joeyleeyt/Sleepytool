@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "scripts": { "dev": "node --env-file=../../../.env --import tsx src/index.ts", "start": "node --import tsx src/index.ts", "typecheck": "tsc --noEmit" },
+  "scripts": { "dev": "node --env-file=../../../.env --import tsx src/index.ts", "start": "node --import tsx src/index.ts", "clean-scratch": "node --import tsx src/clean-scratch.ts", "typecheck": "tsc --noEmit" },
   "dependencies": {
     "@emberforge/core": "workspace:*",
     "@emberforge/db": "workspace:*",
