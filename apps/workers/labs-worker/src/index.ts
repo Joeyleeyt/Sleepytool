@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
-import { Worker, type Job } from 'bullmq';
+import { UnrecoverableError, Worker, type Job } from 'bullmq';
 import pino from 'pino';
 import { acquire, tryAcquireSlot, connection, allLaneQueues, NUM_LANES } from '@emberforge/queue';
 import { assetsRepo, eventsRepo, generationsRepo, promptsRepo, shotsRepo } from '@emberforge/db';
@@ -45,35 +45,118 @@ async function downloadToTmp(url: string, fileName: string): Promise<string> {
   return tmp;
 }
 
+// True only on a job's LAST retry. BullMQ exposes the configured ceiling on
+// job.opts.attempts and the count already burned on job.attemptsMade (which,
+// inside the handler, is attempts-1 on the final run).
+function isFinalAttempt(job: Job): boolean {
+  const max = job.opts?.attempts ?? 1;
+  return job.attemptsMade >= max - 1;
+}
+
+// A hard 69labs verdict on the PROMPT itself — the model rejected it (CENSORED)
+// or the job came back FAILED. Matches ONLY the provider-status errors thrown by
+// labs69.pollUntilDone, not transient "fetch failed"/"poll timed out" messages,
+// so a network blip or timeout still uses the full retry budget; only a doomed
+// prompt short-circuits to the still fallback.
+function isUnrenderablePrompt(err: unknown): boolean {
+  return /69labs job \S+ (FAILED|CENSORED)/i.test((err as Error)?.message ?? '');
+}
+
 // One shot's image OR video generation. Shared by both the labsImage and
 // labsVideo workers — `job.data.kind` selects the branch. 69labs image and
 // video are independent features (separate rate limits and concurrency caps),
 // so each runs on its own queue/worker; this handler is the common body.
+//
+// Fallback: a video prompt 69labs simply cannot render (it returns FAILED or
+// never converges, then BullMQ exhausts every retry) would otherwise leave the
+// shot with NO visual asset — and buildTimeline throws on the FIRST shot
+// missing a video/image, so one doomed prompt blocks the whole render. On the
+// LAST video attempt we fall back to a STILL image from the same prompt (which
+// is already worded for a near-frozen cinemagraph, so it makes a good still);
+// buildTimeline accepts an `image` in place of `video_clip`, so the film
+// finishes with a held frame for that one beat instead of failing outright.
 async function processShot(job: Job) {
   const { projectId, shotId, kind } = job.data as { projectId: string; shotId: string; kind: 'image' | 'video' };
+
+  const shot = await shotsRepo.findById(shotId);
+  if (!shot) throw new Error(`shot ${shotId} not found`);
+
+  try {
+    return await generateVisual(projectId, shot, kind);
+  } catch (err) {
+    // A hard provider failure (69labs CENSORED, or a job that came back FAILED)
+    // is the PROMPT's fault — it won't get better on retry, so go straight to
+    // the still fallback instead of burning the remaining 7 video attempts. A
+    // transient fault (timeout, 429/5xx) still uses the full retry budget and
+    // only falls back on the LAST attempt.
+    const permanent = kind === 'video' && isUnrenderablePrompt(err);
+    if (kind === 'video' && (permanent || isFinalAttempt(job))) {
+      try {
+        log.warn(
+          { shotId, projectId, permanent },
+          `69labs video ${permanent ? 'unrenderable' : 'exhausted all attempts'} — falling back to a still image`,
+        );
+        const res = await generateVisual(projectId, shot, 'image', { fallbackFromVideo: true });
+        await eventsRepo
+          .emit(projectId, 'labs', 'video_fallback_image', { shotId, permanent })
+          .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/video_fallback_image event'));
+        return res;
+      } catch (fbErr) {
+        log.error({ shotId, err: fbErr }, 'video→image fallback also failed');
+        // The still failed too. If the video was permanently unrenderable, don't
+        // let BullMQ retry it 7 more times for nothing — stop the job now.
+        // (A transient final-attempt failure just throws through below; it's
+        // already on its last attempt, so it fails out naturally.)
+        if (permanent) {
+          throw new UnrecoverableError(
+            `69labs video unrenderable and still fallback failed for shot ${shotId}: ${(err as Error).message}`,
+          );
+        }
+      }
+    }
+    throw err;
+  }
+}
+
+// Generate + store ONE visual for a shot at the given kind. Owns the full
+// lifecycle (generation row, provider slot, submit→poll, download, upload,
+// asset row) and its own failure bookkeeping, so callers just decide whether to
+// retry or fall back. `opts.fallbackFromVideo` tags the still produced when a
+// video prompt proved unrenderable.
+async function generateVisual(
+  projectId: string,
+  shot: NonNullable<Awaited<ReturnType<typeof shotsRepo.findById>>>,
+  genKind: 'image' | 'video',
+  opts: { fallbackFromVideo?: boolean } = {},
+) {
+  const shotId = shot.id;
 
   // Where is this shot right now? `loc` is WORKER while we do local work
   // (cache/prompt/slot/download/upload) and 69LABS once it's submitted and we
   // are only polling the provider. Printed to the console so all shots' states
   // are visible at a glance.
-  const tag = `labs:${kind}`;
+  const tag = `labs:${genKind}`;
   const phase = (loc: 'WORKER' | '69LABS', phase: string, extra = '') =>
     console.log(`[${tag}] shot=${shotId} loc=${loc.padEnd(6)} phase=${phase}${extra}`);
 
-  phase('WORKER', 'picked_up');
-  const shot = await shotsRepo.findById(shotId);
-  if (!shot) throw new Error(`shot ${shotId} not found`);
+  phase('WORKER', opts.fallbackFromVideo ? 'picked_up_fallback' : 'picked_up');
 
-  const assetKind = kind === 'image' ? 'image' : 'video_clip';
+  const assetKind = genKind === 'image' ? 'image' : 'video_clip';
   const cached = await assetsRepo.findByShotKind(shotId, assetKind);
   if (cached) {
     phase('WORKER', 'cached', ` asset=${cached.id}`);
-    await eventsRepo.emit(projectId, 'labs', 'cached', { shotId, kind });
+    await eventsRepo.emit(projectId, 'labs', 'cached', { shotId, kind: genKind });
     return { cached: true, assetId: cached.id };
   }
 
-  const target = kind === 'image' ? '69labs.image' : '69labs.video';
-  const prompt = await promptsRepo.findForShot(shotId, target);
+  const target = genKind === 'image' ? '69labs.image' : '69labs.video';
+  let prompt = await promptsRepo.findForShot(shotId, target);
+  if (!prompt && genKind === 'image') {
+    // Fallback path: a video shot has no dedicated 69labs.image prompt. Reuse
+    // its video prompt — already written for a near-still cinemagraph, so it
+    // renders well as a single frame.
+    prompt = await promptsRepo.findForShot(shotId, '69labs.video');
+  }
   if (!prompt) throw new Error(`no ${target} prompt for shot ${shotId}`);
 
   const generation = await generationsRepo.create({
@@ -90,7 +173,7 @@ async function processShot(job: Job) {
   // can re-queue a generation under a NEW id mid-poll; we track every id this
   // shot has lived under so shutdown/cleanup cancels the live one, not just the
   // original (cancelling a stale id leaks a provider concurrency slot).
-  const seg = kind === 'image' ? ('images' as const) : ('videos' as const);
+  const seg = genKind === 'image' ? ('images' as const) : ('videos' as const);
   const myJobIds = new Set<string>();
   let providerJobId: string | undefined;
   const trackJob = (id: string) => {
@@ -119,7 +202,7 @@ async function processShot(job: Job) {
     phase('69LABS', status, jid ? ` job=${jid}` : '');
   };
   try {
-    await acquire(kind === 'image' ? '69labs.image' : '69labs.video');
+    await acquire(genKind === 'image' ? '69labs.image' : '69labs.video');
     await generationsRepo.markStarted(generation.id);
     const t0 = Date.now();
 
@@ -147,7 +230,7 @@ async function processShot(job: Job) {
         // key only drops its own share. (Held under the key's concurrency slot —
         // fine: other jobs on a spent key would be hour-blocked too.)
         await acquire(`${target}.hourly`, 1, `${target}.hourly:${keyId}`);
-        return kind === 'image'
+        return genKind === 'image'
           ? labs69.image({
             prompt: prompt.promptText,
             negative: prompt.negative ?? undefined,
@@ -179,8 +262,8 @@ async function processShot(job: Job) {
           });
       },
       {
-        perKeyMax: kind === 'image' ? IMAGE_PER_KEY_MAX : VIDEO_PER_KEY_MAX,
-        leaseMs: kind === 'image' ? 12 * 60_000 : 15 * 60_000,
+        perKeyMax: genKind === 'image' ? IMAGE_PER_KEY_MAX : VIDEO_PER_KEY_MAX,
+        leaseMs: genKind === 'image' ? 12 * 60_000 : 15 * 60_000,
         // Redis-backed slot pools, one per key: `cc:69labs.image:<keyId>`.
         tryAcquireSlot,
         slotKeyFor: (keyId) => `${target}:${keyId}`,
@@ -192,14 +275,14 @@ async function processShot(job: Job) {
 
     // Back in the worker: COMPLETED at 69labs, now pulling + storing the bytes.
     phase('WORKER', 'downloading');
-    const ext = kind === 'image' ? 'png' : 'mp4';
+    const ext = genKind === 'image' ? 'png' : 'mp4';
     const tmp = await downloadToTmp(result.url, `labs_${shotId}.${ext}`);
     phase('WORKER', 'uploading');
     const key =
-      kind === 'image'
+      genKind === 'image'
         ? r2Paths.shotImage(projectId, shotId, prompt.inputHash)
         : r2Paths.shotVideo(projectId, shotId, prompt.inputHash);
-    const uploaded = await uploadFile(tmp, key, kind === 'image' ? 'image/png' : 'video/mp4');
+    const uploaded = await uploadFile(tmp, key, genKind === 'image' ? 'image/png' : 'video/mp4');
     await unlink(tmp).catch(() => {});
 
     const asset = await assetsRepo.create({
@@ -209,8 +292,11 @@ async function processShot(job: Job) {
       kind: assetKind,
       r2Key: uploaded.key,
       bytes: uploaded.bytes,
-      durationS: kind === 'video' ? String(Number(shot.durationS)) : null,
-      metadata: { providerJobId: result.providerJobId },
+      durationS: genKind === 'video' ? String(Number(shot.durationS)) : null,
+      metadata: {
+        providerJobId: result.providerJobId,
+        ...(opts.fallbackFromVideo ? { fallbackFromVideo: true } : {}),
+      },
     });
 
     await generationsRepo.markSucceeded(generation.id, {
@@ -218,7 +304,11 @@ async function processShot(job: Job) {
       latencyMs: Date.now() - t0,
     });
     phase('WORKER', 'done', ` asset=${asset.id}`);
-    await eventsRepo.emit(projectId, 'labs', 'succeeded', { shotId, kind });
+    await eventsRepo.emit(projectId, 'labs', 'succeeded', {
+      shotId,
+      kind: genKind,
+      ...(opts.fallbackFromVideo ? { fallbackFromVideo: true } : {}),
+    });
     return { assetId: asset.id };
   } catch (err) {
     const message = (err as Error).message;
@@ -230,7 +320,7 @@ async function processShot(job: Job) {
     // app polls (/events) and re-logs in the browser console. Best-effort — a
     // failed emit must not mask the original generation error.
     await eventsRepo
-      .emit(projectId, 'labs', 'failed', { shotId, kind, message, providerJobId })
+      .emit(projectId, 'labs', 'failed', { shotId, kind: genKind, message, providerJobId })
       .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/failed event'));
     throw err;
   } finally {

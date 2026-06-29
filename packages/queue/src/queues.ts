@@ -2,10 +2,10 @@ import { Queue, type JobsOptions } from 'bullmq';
 import { getConnection } from './connection.js';
 import type { QueueName } from './types.js';
 
-function backoff(attempts = 5): JobsOptions {
+function backoff(attempts = 5, delay = 5_000): JobsOptions {
   return {
     attempts,
-    backoff: { type: 'exponential', delay: 5_000 },
+    backoff: { type: 'exponential', delay },
     removeOnComplete: { age: 86_400, count: 10_000 },
     removeOnFail: { age: 604_800 },
   };
@@ -28,8 +28,15 @@ const OPTS: Record<QueueName, JobsOptions | undefined> = {
   tts:          backoff(5),
   tts2:         backoff(5),
   remotion:     backoff(3),
-  timeline:     undefined,
-  audio:        undefined,
+  // timeline + audio are pure read→compute→upsert (timeline) and resume-safe
+  // (audio reuses a valid mix on disk), so a transient Redis/R2/DB fault — e.g.
+  // a Supabase-pooler EMAXCONN burst — must not discard the job. Retry with a
+  // long backoff so the spike has time to clear (a pooler saturation lasts
+  // seconds-to-minutes, not the 5s a leaf-LLM retry assumes). These also feed
+  // the render flow's children via jobOptionsFor() — without that, flow leaves
+  // run attempts:1 and a single blip kills the whole render. See flows.ts.
+  timeline:     backoff(3, 30_000),
+  audio:        backoff(3, 60_000),
   render:       backoff(3),
   publish:      undefined,
   orchestrator: undefined,

@@ -1,5 +1,6 @@
 import { FlowProducer } from 'bullmq';
 import { getConnection } from './connection.js';
+import { jobOptionsFor } from './queues.js';
 
 // Lazy FlowProducer — opens its Redis connection on first use, not at
 // module-load. See queues.ts for the same pattern + rationale.
@@ -133,11 +134,18 @@ export async function startRenderFlow(projectId: string) {
             name: 'mixAudio',
             queueName: 'audio',
             data: { projectId },
+            // Flow children default to attempts:1 — BullMQ does NOT apply a
+            // queue's defaultJobOptions to flow leaves. Pull the queue's retry
+            // opts in explicitly so a transient fault (e.g. the EMAXCONN pooler
+            // burst that discarded a whole render) retries instead of failing
+            // the parent and aborting the flow. Both stages are resume-safe.
+            opts: jobOptionsFor('audio'),
             children: [
               {
                 name: 'buildTimeline',
                 queueName: 'timeline',
                 data: { projectId },
+                opts: jobOptionsFor('timeline'),
               },
             ],
           },
