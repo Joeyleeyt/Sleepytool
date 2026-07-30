@@ -109,7 +109,10 @@ function simplifyPrompt(promptText: string): string {
     // Any residual prose fragment — a question or a mid-clause truncation.
     if (/\?/.test(c) || /(?:…|\.\.\.)$/.test(c)) return false;
     // Negation-style guard clauses ("no borders", "no on-screen text"). 69labs
-    // has no negative-prompt channel, so these only burn attention budget.
+    // has no negative-prompt channel — labs69.image()/video() accept a
+    // `negative` arg for API parity but never put it in the request body, which
+    // is exactly why the prompt builders inline these guards into the positive
+    // prompt. Here they only burn attention budget, so drop them.
     if (/^no\s+/i.test(c)) return false;
     return true;
   });
@@ -171,7 +174,11 @@ async function processShot(job: Job) {
           { shotId, projectId },
           '69labs image unrenderable — retrying once with a simplified prompt',
         );
-        const res = await generateVisual(projectId, shot, 'image', { simplifyPrompt: true });
+        const res = await generateVisual(projectId, shot, 'image', {
+          simplifyPrompt: true,
+          // Don't spend a provider round-trip re-submitting byte-identical text.
+          requireSimplified: true,
+        });
         await eventsRepo
           .emit(projectId, 'labs', 'image_simplified_prompt', { shotId })
           .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/image_simplified_prompt event'));
@@ -228,7 +235,14 @@ async function generateVisual(
   projectId: string,
   shot: NonNullable<Awaited<ReturnType<typeof shotsRepo.findById>>>,
   genKind: 'image' | 'video',
-  opts: { fallbackFromVideo?: boolean; simplifyPrompt?: boolean } = {},
+  opts: {
+    fallbackFromVideo?: boolean;
+    simplifyPrompt?: boolean;
+    // Salvage attempts only: bail out instead of submitting when simplification
+    // changed nothing, so we don't pay a provider round-trip to re-learn that
+    // 69labs rejects this exact text.
+    requireSimplified?: boolean;
+  } = {},
 ) {
   const shotId = shot.id;
 
@@ -244,6 +258,10 @@ async function generateVisual(
 
   const assetKind = genKind === 'image' ? 'image' : 'video_clip';
   const cached = await assetsRepo.findByShotKind(shotId, assetKind);
+  // Note: this short-circuits BEFORE any prompt work, so a salvage attempt
+  // (simplifyPrompt) whose shot already has an image of this kind returns the
+  // existing asset and never simplifies. That's intended — an asset in hand is
+  // the whole goal, and re-rendering it would only cost a provider slot.
   if (cached) {
     phase('WORKER', 'cached', ` asset=${cached.id}`);
     await eventsRepo.emit(projectId, 'labs', 'cached', { shotId, kind: genKind });
@@ -266,6 +284,11 @@ async function generateVisual(
   const promptText = opts.simplifyPrompt ? simplifyPrompt(prompt.promptText) : prompt.promptText;
   if (opts.simplifyPrompt) {
     phase('WORKER', 'simplified_prompt', ` chars=${prompt.promptText.length}→${promptText.length}`);
+    // Nothing to gain: a short prompt with no prose lead and no "no X" guards
+    // simplifies to itself, and 69labs has already rejected it verbatim.
+    if (opts.requireSimplified && promptText === prompt.promptText) {
+      throw new Error(`simplifying changed nothing for shot ${shotId}`);
+    }
   }
 
   const generation = await generationsRepo.create({
