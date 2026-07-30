@@ -150,7 +150,42 @@ function enforceWorld(
 // genuine location.
 const SUBJECT_HAS_PLACE = /\b(in|within|inside|atop|on|at|beneath|under|among|amid|beside|near)\s+(a|an|the|his|her|their|its|this|that)\b/i;
 
-function composeSummary(v: ShotVisual, fallbackNarration: string): string {
+// A summary that isn't a DESCRIPTION OF A PICTURE. `visualSummary` leads the
+// generation prompt (see prompt-engine builders), so when the classify LLM
+// returns no `subject` we used to fall through to raw narration — and narration
+// is prose, not imagery. A rhetorical question ("What is it, specifically, that
+// keeps her alive…?") or a sentence truncated mid-clause by `summarize()` gives
+// the image model nothing to draw; 69labs accepts the job, starts inference and
+// then hard-crashes a few seconds later with a bare FAILED and no reason. That
+// shot then has no visual at all, and buildTimeline throws on the first missing
+// one, so a single bad sentence blocks the whole render.
+//
+// Rejected shapes:
+//   • contains '?'         → interrogative; describes nothing
+//   • ends with '…'/'...'  → truncated mid-clause by summarize()
+//   • too short            → no usable visual content
+const NON_VISUAL_SUMMARY = /\?|(?:…|\.\.\.)\s*$/;
+
+function isUsableVisualSummary(s: string): boolean {
+  const t = s.trim();
+  return t.length >= 15 && !NON_VISUAL_SUMMARY.test(t);
+}
+
+// Neutral, always-renderable stand-in used when nothing usable can be derived.
+// Mirrors the wording enforceWorld() falls back to, so a rescued shot still
+// matches the film's look instead of standing out.
+function ambientFallbackSummary(worldName?: string | null): string {
+  return (
+    `A slow, still, low-stimulation ambient view${worldName ? ` of ${worldName}` : ''}, ` +
+    `dark, quiet and barely moving.`
+  );
+}
+
+function composeSummary(
+  v: ShotVisual,
+  fallbackNarration: string,
+  worldName?: string | null,
+): string {
   const subject = (v.subject ?? '').trim();
   if (subject) {
     const location = (v.location ?? '').trim();
@@ -163,11 +198,26 @@ function composeSummary(v: ShotVisual, fallbackNarration: string): string {
     const base = parts.join(', ');
     const mood = (v.mood ?? '').trim();
     const lead = mood ? `${mood}: ${base}` : base;
-    // Keep the model's richer sentence if it already elaborates on the subject.
+    // Keep the model's richer sentence if it already elaborates on the subject —
+    // but only when it actually reads as a visual description. Otherwise use the
+    // structured subject/activity/location line, which always does.
     const summary = (v.visualSummary ?? '').trim();
-    return summary && summary.toLowerCase().includes(subject.toLowerCase()) ? summary : lead;
+    return summary &&
+      summary.toLowerCase().includes(subject.toLowerCase()) &&
+      isUsableVisualSummary(summary)
+      ? summary
+      : lead;
   }
-  return (v.visualSummary ?? '').trim() || summarize(fallbackNarration);
+
+  // No structured subject. Take the model's free-text summary only if it reads
+  // as a picture; never hand raw narration to the image model.
+  const summary = (v.visualSummary ?? '').trim();
+  if (isUsableVisualSummary(summary)) return summary;
+
+  const narrated = summarize(fallbackNarration);
+  if (isUsableVisualSummary(narrated)) return narrated;
+
+  return ambientFallbackSummary(worldName);
 }
 
 export async function classifyStage(projectId: string) {
@@ -281,7 +331,19 @@ export async function classifyStage(projectId: string) {
         // corrected, use the rotated in-world view; otherwise compose it from the
         // per-shot subject/activity/location/mood so each shot tracks its own
         // sentence while staying inside the world.
-        const anchored = corrected ? corrected.summary : composeSummary(v, c.text);
+        const anchored = corrected
+          ? corrected.summary
+          : composeSummary(v, c.text, world.worldName);
+        // A shot whose summary had to be rescued (no usable subject AND no
+        // renderable free-text/narration) would previously have shipped raw
+        // narration to 69labs and crashed its image pipeline. Log it so a
+        // recurring gap in the classify output is visible rather than silent.
+        if (!corrected && !v.subject?.trim() && anchored === ambientFallbackSummary(world.worldName)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[classify] scene ${scene.ordinal} shot ${i} had no renderable summary — using ambient fallback`,
+          );
+        }
         return {
           sceneId: scene.id,
           projectId,
