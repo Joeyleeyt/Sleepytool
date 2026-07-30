@@ -62,6 +62,74 @@ function isUnrenderablePrompt(err: unknown): boolean {
   return /69labs job \S+ (FAILED|CENSORED)/i.test((err as Error)?.message ?? '');
 }
 
+// Reduce a prompt 69labs refused to render down to something it reliably can.
+//
+// A doomed image prompt is almost always doomed because of its LEAD clause: the
+// prompt builders put `visualSummary` first (it carries the most weight), and a
+// summary that is prose rather than imagery — a rhetorical question, or a
+// sentence truncated mid-clause — gives the model nothing to draw. 69labs then
+// accepts the job, begins inference and hard-crashes seconds later with a bare
+// FAILED and no reason. The trailing style/guard clauses are safe boilerplate.
+//
+// So: drop any leading clause that reads as prose, strip the long anti-artifact
+// guard tail (its "no X" phrasing is dead weight once the prompt is short), and
+// keep the descriptive middle. If nothing survives, fall back to a neutral
+// ambient still that always renders. Only used AFTER a permanent failure, so a
+// weaker prompt is strictly better than no asset at all.
+const AMBIENT_STILL_PROMPT =
+  'a slow, still, low-stimulation ambient view, dark, quiet and barely moving, ' +
+  'soft diffuse light, low-key, desaturated, photoreal, cinematic composition';
+
+// How many leading clauses (subject + scene description) to keep, plus how many
+// render-quality tags to rescue from beyond that cap. QUALITY_TAG matches the
+// tags that describe HOW the frame should be rendered rather than what is in it.
+const CLAUSE_CAP = 12;
+const QUALITY_CAP = 4;
+const QUALITY_TAG = /\b(photoreal|photorealistic|hyperdetailed|cinematic|still frame|film grain|shallow depth of field|volumetric)\b/i;
+
+function simplifyPrompt(promptText: string): string {
+  // Strip the prose lead FIRST, as whole sentences. The lead is narration and
+  // contains its own commas, so splitting on commas up front would scatter it
+  // into fragments ("What is it" / "specifically") that individually look clean
+  // and survive clause filtering. Cut everything up to and including the last
+  // sentence terminator ('?', '!', '…') that appears before the style tags.
+  let text = promptText;
+  const proseEnd = Math.max(text.lastIndexOf('?'), text.lastIndexOf('!'), text.lastIndexOf('…'));
+  if (proseEnd >= 0) text = text.slice(proseEnd + 1);
+  // A truncated lead may end in a bare '…,' or trail into the tags — drop any
+  // now-orphaned leading punctuation.
+  text = text.replace(/^[\s,.;:]+/, '');
+
+  const clauses = text
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  const kept = clauses.filter((c) => {
+    // Any residual prose fragment — a question or a mid-clause truncation.
+    if (/\?/.test(c) || /(?:…|\.\.\.)$/.test(c)) return false;
+    // Negation-style guard clauses ("no borders", "no on-screen text"). 69labs
+    // has no negative-prompt channel, so these only burn attention budget.
+    if (/^no\s+/i.test(c)) return false;
+    return true;
+  });
+
+  // Cap the length: an over-long prompt is itself a risk factor, and by this
+  // point we care about GETTING A FRAME more than about honouring every tag.
+  //
+  // Truncating the head alone would drop the TAIL, and the tail is where the
+  // render-quality tags live ("photoreal", "cinematic composition") — the very
+  // tags worth keeping on a salvage attempt. So take the leading clauses (the
+  // subject and scene) and then re-append any quality tags the cap cut off.
+  const head = kept.slice(0, CLAUSE_CAP);
+  const quality = kept
+    .slice(CLAUSE_CAP)
+    .filter((c) => QUALITY_TAG.test(c))
+    .slice(0, QUALITY_CAP);
+  const out = [...head, ...quality].join(', ').trim();
+  return out.length >= 20 ? out : AMBIENT_STILL_PROMPT;
+}
+
 // One shot's image OR video generation. Shared by both the labsImage and
 // labsVideo workers — `job.data.kind` selects the branch. 69labs image and
 // video are independent features (separate rate limits and concurrency caps),
@@ -89,14 +157,47 @@ async function processShot(job: Job) {
     // the still fallback instead of burning the remaining 7 video attempts. A
     // transient fault (timeout, 429/5xx) still uses the full retry budget and
     // only falls back on the LAST attempt.
-    const permanent = kind === 'video' && isUnrenderablePrompt(err);
+    const unrenderable = isUnrenderablePrompt(err);
+
+    // IMAGE: there is no cheaper kind to fall back to, so a doomed image prompt
+    // used to burn every BullMQ attempt and then leave the shot with no visual
+    // at all — and buildTimeline throws on the FIRST missing one, so a single
+    // bad prompt blocked the entire render. Retry once with the prompt reduced
+    // to its renderable core; if that works the shot is saved, and if it doesn't
+    // we stop immediately instead of retrying a prompt we know 69labs rejects.
+    if (kind === 'image' && unrenderable) {
+      try {
+        log.warn(
+          { shotId, projectId },
+          '69labs image unrenderable — retrying once with a simplified prompt',
+        );
+        const res = await generateVisual(projectId, shot, 'image', { simplifyPrompt: true });
+        await eventsRepo
+          .emit(projectId, 'labs', 'image_simplified_prompt', { shotId })
+          .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/image_simplified_prompt event'));
+        return res;
+      } catch (fbErr) {
+        log.error({ shotId, err: fbErr }, 'simplified-prompt image retry also failed');
+        throw new UnrecoverableError(
+          `69labs image unrenderable and simplified retry failed for shot ${shotId}: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    const permanent = kind === 'video' && unrenderable;
     if (kind === 'video' && (permanent || isFinalAttempt(job))) {
       try {
         log.warn(
           { shotId, projectId, permanent },
           `69labs video ${permanent ? 'unrenderable' : 'exhausted all attempts'} — falling back to a still image`,
         );
-        const res = await generateVisual(projectId, shot, 'image', { fallbackFromVideo: true });
+        // When the video was PERMANENTLY unrenderable, the still would reuse the
+        // very prompt 69labs just rejected — simplify it too, or the fallback
+        // simply reproduces the same crash.
+        const res = await generateVisual(projectId, shot, 'image', {
+          fallbackFromVideo: true,
+          simplifyPrompt: permanent,
+        });
         await eventsRepo
           .emit(projectId, 'labs', 'video_fallback_image', { shotId, permanent })
           .catch((e) => log.warn({ shotId, e }, 'failed to emit labs/video_fallback_image event'));
@@ -127,7 +228,7 @@ async function generateVisual(
   projectId: string,
   shot: NonNullable<Awaited<ReturnType<typeof shotsRepo.findById>>>,
   genKind: 'image' | 'video',
-  opts: { fallbackFromVideo?: boolean } = {},
+  opts: { fallbackFromVideo?: boolean; simplifyPrompt?: boolean } = {},
 ) {
   const shotId = shot.id;
 
@@ -158,6 +259,14 @@ async function generateVisual(
     prompt = await promptsRepo.findForShot(shotId, '69labs.video');
   }
   if (!prompt) throw new Error(`no ${target} prompt for shot ${shotId}`);
+
+  // On a salvage attempt, submit a reduced version of the stored prompt. The
+  // prompt ROW is left untouched — this is a per-attempt override, so the
+  // original text stays visible in Studio and a later retry starts from it.
+  const promptText = opts.simplifyPrompt ? simplifyPrompt(prompt.promptText) : prompt.promptText;
+  if (opts.simplifyPrompt) {
+    phase('WORKER', 'simplified_prompt', ` chars=${prompt.promptText.length}→${promptText.length}`);
+  }
 
   const generation = await generationsRepo.create({
     promptId: prompt.id,
@@ -232,7 +341,7 @@ async function generateVisual(
         await acquire(`${target}.hourly`, 1, `${target}.hourly:${keyId}`);
         return genKind === 'image'
           ? labs69.image({
-            prompt: prompt.promptText,
+            prompt: promptText,
             negative: prompt.negative ?? undefined,
             onStatus,
             // 1k is the only resolution this 69labs account/tier actually
@@ -248,7 +357,7 @@ async function generateVisual(
             apiKey,
           })
           : labs69.video({
-            prompt: prompt.promptText,
+            prompt: promptText,
             negative: prompt.negative ?? undefined,
             durationS: Number(shot.durationS),
             // Intentionally NOT passing aspectRatio / resolution — the
@@ -296,6 +405,7 @@ async function generateVisual(
       metadata: {
         providerJobId: result.providerJobId,
         ...(opts.fallbackFromVideo ? { fallbackFromVideo: true } : {}),
+        ...(opts.simplifyPrompt ? { simplifiedPrompt: true } : {}),
       },
     });
 
